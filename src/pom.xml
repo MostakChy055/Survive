@@ -1,0 +1,160 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0
+                             https://maven.apache.org/xsd/maven-4.0.0.xsd">
+
+  <modelVersion>4.0.0</modelVersion>
+
+  <!--
+    Spring Boot parent — manages ALL dependency versions for us.
+    You never need to specify versions for Spring libraries manually.
+    If a version is wrong, it's because this parent version is outdated.
+  -->
+  <parent>
+    <groupId>org.springframework.boot</groupId>
+    <artifactId>spring-boot-starter-parent</artifactId>
+    <version>3.2.5</version>
+    <relativePath/>
+  </parent>
+
+  <!--
+    YOUR project identity.
+    groupId + artifactId must match what Spring Initializr generated.
+    Check your existing pom.xml — these might already be set to
+    com.mostak / chatroom. Keep whatever Initializr gave you.
+  -->
+  <groupId>com.mostak</groupId>
+  <artifactId>chatroom</artifactId>
+  <version>0.0.1-SNAPSHOT</version>
+  <name>chatroom</name>
+  <description>Real-time chatroom — Phase 2</description>
+
+  <properties>
+    <java.version>17</java.version>
+  </properties>
+
+  <dependencies>
+
+    <!--
+      ════════════════════════════════════════════
+      PHASE 2 REQUIRES THESE — ADD IF MISSING
+      ════════════════════════════════════════════
+
+      Spring Initializr may have already added some of these
+      if you selected them during project creation.
+      Only ADD the ones that are not already in your pom.xml.
+      Never duplicate a dependency.
+    -->
+
+    <!--
+      spring-boot-starter-web
+      Gives us: embedded Tomcat + Spring MVC.
+      Needed even for WebSocket because the handshake
+      starts as an HTTP request before upgrading.
+      Spring Initializr adds this if you chose "Spring Web".
+    -->
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-starter-web</artifactId>
+    </dependency>
+
+    <!--
+      spring-boot-starter-websocket
+      THE KEY DEPENDENCY for Phase 2.
+      Adds: WebSocket support + STOMP protocol + SockJS fallback.
+      Spring Initializr does NOT add this by default —
+      you almost certainly need to add this one.
+    -->
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-starter-websocket</artifactId>
+    </dependency>
+
+    <!--
+      spring-boot-starter-data-jpa
+      Adds: Hibernate ORM + Spring Data repositories.
+      Needed for saving/loading messages from the database.
+      Spring Initializr adds this if you chose "Spring Data JPA".
+    -->
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-starter-data-jpa</artifactId>
+    </dependency>
+
+    <!--
+      h2
+      In-memory database — no installation needed.
+      Data lives in RAM and resets on every restart.
+      Perfect for learning. We switch to PostgreSQL in later phases.
+      Spring Initializr adds this if you chose "H2 Database".
+    -->
+    <dependency>
+      <groupId>com.h2database</groupId>
+      <artifactId>h2</artifactId>
+      <scope>runtime</scope>
+    </dependency>
+
+    <!--
+      lombok
+      Eliminates Java boilerplate via annotations.
+      @Data, @Builder, @NoArgsConstructor etc.
+      Spring Initializr adds this if you chose "Lombok".
+
+      IMPORTANT: After adding Lombok, go to:
+        IntelliJ → Settings → Plugins → search "Lombok" → install
+        IntelliJ → Settings → Build → Compiler → Annotation Processors
+                → check "Enable annotation processing"
+      Without this IntelliJ will show errors even though it compiles.
+    -->
+    <dependency>
+      <groupId>org.projectlombok</groupId>
+      <artifactId>lombok</artifactId>
+      <optional>true</optional>
+    </dependency>
+
+    <!--
+      spring-boot-starter-test
+      JUnit 5 + Mockito. Spring Initializr always adds this.
+      Leave it as-is.
+    -->
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-starter-test</artifactId>
+      <scope>test</scope>
+    </dependency>
+
+    <!--
+      ════════════════════════════════════════════
+      DELIBERATELY EXCLUDED IN PHASE 2:
+      spring-boot-starter-security
+
+      We are NOT adding Security yet. Phase 2 focuses purely on
+      WebSocket + STOMP working correctly.
+      Adding Security now would require CSRF config, login endpoints,
+      and CORS — too many moving parts at once.
+
+      We add Security in Phase 5.
+      ════════════════════════════════════════════
+    -->
+
+  </dependencies>
+
+  <build>
+    <plugins>
+      <plugin>
+        <groupId>org.springframework.boot</groupId>
+        <artifactId>spring-boot-maven-plugin</artifactId>
+        <configuration>
+          <excludes>
+            <exclude>
+              <groupId>org.projectlombok</groupId>
+              <artifactId>lombok</artifactId>
+            </exclude>
+          </excludes>
+        </configuration>
+      </plugin>
+    </plugins>
+  </build>
+
+</project>

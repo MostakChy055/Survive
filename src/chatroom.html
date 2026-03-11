@@ -1,0 +1,848 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Chatroom — Phase 2</title>
+
+  <!--
+    ═══════════════════════════════════════════════════════════════
+    PHASE 2: Raw WebSocket → Spring Boot Backend
+    ═══════════════════════════════════════════════════════════════
+
+    WHAT CHANGED FROM PHASE 1:
+      1. Server URL: wss://echo.websocket.org → ws://localhost:8080/ws/websocket
+      2. Messages now ACTUALLY broadcast to all connected users
+      3. JOIN/LEAVE messages are saved in H2 database
+      4. History loads on connect via GET /api/messages
+      5. Message routing: /app/chat.send → @MessageMapping → /topic/chatroom
+
+    WHAT STAYED THE SAME:
+      - raw new WebSocket() API (we add STOMP client in Phase 4)
+      - same JSON format { type, sender, content, sentAt }
+      - same HTML/CSS structure (visual design unchanged)
+      - same DOM manipulation pattern
+
+    WHY ws://localhost:8080/ws/websocket (not /ws)?
+      Our Spring Boot has SockJS enabled (.withSockJS()).
+      SockJS adds a negotiation layer — it first visits /ws/info to check
+      what transports are available, then connects to /ws/websocket
+      for the actual native WebSocket connection.
+      The /websocket suffix tells SockJS: "skip negotiation, use raw WS directly."
+      In Phase 4 when we add the SockJS JavaScript client, it handles
+      this automatically and we go back to just /ws.
+
+    WHAT YOU NEED TO DO:
+      1. Add the backend files to IntelliJ (pom.xml + all Java files)
+      2. Run the Spring Boot app (green play button in IntelliJ)
+      3. Open this HTML file in TWO browser tabs
+      4. Enter different usernames in each tab
+      5. Send messages — they appear in both tabs!
+  -->
+
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=Azeret+Mono:wght@300;400;500;700&display=swap" rel="stylesheet">
+
+  <style>
+    /* ─────────────────────────────────────────────────────────────
+       CSS is IDENTICAL to Phase 1.
+       We only changed the JavaScript logic — the UI looks the same.
+       This teaches an important principle: presentation and logic
+       are separate concerns. Changing the backend doesn't touch CSS.
+    ───────────────────────────────────────────────────────────── */
+    :root {
+      --bg-base:       #080c10;
+      --bg-surface:    #0d1117;
+      --bg-raised:     #161b22;
+      --border:        #21262d;
+      --border-focus:  #388bfd;
+      --accent:        #388bfd;
+      --accent-dim:    #1f3550;
+      --text-primary:  #e6edf3;
+      --text-secondary:#7d8590;
+      --text-muted:    #30363d;
+      --green:         #3fb950;
+      --red:           #f85149;
+      --my-bubble:     #132032;
+      --their-bubble:  #161b22;
+    }
+
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    html, body {
+      height: 100%;
+      font-family: 'Azeret Mono', monospace;
+      font-size: 14px;
+      background: var(--bg-base);
+      color: var(--text-primary);
+      overflow: hidden;
+    }
+
+    ::-webkit-scrollbar { width: 4px; }
+    ::-webkit-scrollbar-track { background: transparent; }
+    ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
+    ::-webkit-scrollbar-thumb:hover { background: var(--accent); }
+
+    #join-screen {
+      height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      background-image: radial-gradient(circle, #21262d 1px, transparent 1px);
+      background-size: 32px 32px;
+    }
+
+    .join-card {
+      background: var(--bg-surface);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 40px 36px;
+      width: 100%;
+      max-width: 400px;
+      box-shadow: 0 0 0 1px var(--border), 0 20px 60px rgba(0,0,0,0.6);
+    }
+
+    .window-dots { display: flex; gap: 7px; margin-bottom: 28px; }
+    .dot { width: 12px; height: 12px; border-radius: 50%; }
+    .dot-red    { background: #ff5f57; }
+    .dot-yellow { background: #febc2e; }
+    .dot-green  { background: #28c840; }
+
+    .join-title { font-size: 22px; font-weight: 700; color: var(--text-primary); margin-bottom: 6px; letter-spacing: -0.5px; }
+    .join-subtitle { font-size: 12px; color: var(--text-secondary); margin-bottom: 28px; letter-spacing: 0.5px; text-transform: uppercase; }
+
+    .field-label { display: block; font-size: 11px; color: var(--accent); text-transform: uppercase; letter-spacing: 1.5px; margin-bottom: 8px; }
+
+    .field-input {
+      width: 100%;
+      background: var(--bg-base);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 11px 14px;
+      font-family: 'Azeret Mono', monospace;
+      font-size: 14px;
+      color: var(--text-primary);
+      outline: none;
+      transition: border-color 0.15s, box-shadow 0.15s;
+      margin-bottom: 20px;
+    }
+    .field-input::placeholder { color: var(--text-muted); }
+    .field-input:focus { border-color: var(--border-focus); box-shadow: 0 0 0 3px rgba(56,139,253,0.12); }
+
+    .btn-primary {
+      width: 100%;
+      background: var(--accent);
+      color: #ffffff;
+      border: none;
+      border-radius: 8px;
+      padding: 12px;
+      font-family: 'Azeret Mono', monospace;
+      font-size: 13px;
+      font-weight: 700;
+      letter-spacing: 1px;
+      text-transform: uppercase;
+      cursor: pointer;
+      transition: background 0.15s, transform 0.1s;
+    }
+    .btn-primary:hover  { background: #1f6feb; }
+    .btn-primary:active { transform: scale(0.98); }
+    .btn-primary:disabled { background: var(--bg-raised); color: var(--text-muted); cursor: not-allowed; }
+
+    .error-text { color: var(--red); font-size: 12px; margin-top: 12px; display: none; }
+
+    #chat-screen { height: 100vh; display: none; flex-direction: column; }
+
+    .topbar { display: flex; align-items: center; justify-content: space-between; padding: 0 20px; height: 52px; background: var(--bg-surface); border-bottom: 1px solid var(--border); flex-shrink: 0; }
+    .topbar-left { display: flex; align-items: center; gap: 16px; }
+    .brand { font-size: 15px; font-weight: 700; color: var(--text-primary); letter-spacing: -0.3px; }
+    .brand span { color: var(--accent); }
+
+    /* Phase badge — shows which phase we're on */
+    .phase-badge {
+      font-size: 10px;
+      background: var(--accent-dim);
+      color: var(--accent);
+      padding: 2px 8px;
+      border-radius: 100px;
+      border: 1px solid rgba(56,139,253,0.3);
+      letter-spacing: 1px;
+    }
+
+    .status-badge { display: flex; align-items: center; gap: 6px; font-size: 11px; color: var(--text-secondary); text-transform: uppercase; letter-spacing: 1px; }
+    .status-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--text-muted); transition: background 0.3s; }
+    .status-dot.connected    { background: var(--green); box-shadow: 0 0 6px rgba(63,185,80,0.6); }
+    .status-dot.connecting   { background: #e3b341; animation: pulse 1s infinite; }
+    .status-dot.disconnected { background: var(--red); }
+
+    @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.3; } }
+
+    .topbar-right { display: flex; align-items: center; gap: 14px; }
+    .current-user { font-size: 12px; color: var(--accent); }
+    .btn-leave { font-family: 'Azeret Mono', monospace; font-size: 11px; color: var(--text-secondary); background: transparent; border: 1px solid var(--border); border-radius: 6px; padding: 5px 12px; cursor: pointer; text-transform: uppercase; letter-spacing: 1px; transition: color 0.15s, border-color 0.15s; }
+    .btn-leave:hover { color: var(--red); border-color: var(--red); }
+
+    .chat-body { display: flex; flex: 1; overflow: hidden; }
+    .messages-column { display: flex; flex-direction: column; flex: 1; overflow: hidden; }
+
+    #message-list { flex: 1; overflow-y: auto; padding: 16px 20px; display: flex; flex-direction: column; gap: 2px; }
+
+    .message { display: flex; gap: 10px; padding: 4px 6px; border-radius: 8px; transition: background 0.1s; }
+    .message:hover { background: rgba(255,255,255,0.02); }
+    .message.mine { flex-direction: row-reverse; }
+
+    .avatar { width: 32px; height: 32px; border-radius: 8px; display: flex; align-items: center; justify-content: center; font-size: 13px; font-weight: 700; flex-shrink: 0; margin-top: 2px; }
+    .message-body { display: flex; flex-direction: column; max-width: 68%; }
+    .message.mine .message-body { align-items: flex-end; }
+    .message-meta { display: flex; align-items: baseline; gap: 8px; margin-bottom: 4px; }
+    .message.mine .message-meta { flex-direction: row-reverse; }
+    .message-sender { font-size: 12px; font-weight: 700; color: var(--accent); }
+    .message-time { font-size: 10px; color: var(--text-muted); }
+
+    .bubble { padding: 9px 13px; border-radius: 12px; font-size: 13px; line-height: 1.55; color: var(--text-primary); word-break: break-word; }
+    .message.mine   .bubble { background: var(--my-bubble); border-radius: 12px 4px 12px 12px; }
+    .message.theirs .bubble { background: var(--their-bubble); border-radius: 4px 12px 12px 12px; }
+
+    .system-event { display: flex; justify-content: center; padding: 6px 0; }
+    .system-event-text { font-size: 11px; color: var(--text-muted); background: var(--bg-surface); border: 1px solid var(--border); border-radius: 100px; padding: 3px 14px; }
+    .system-event-text.join  { color: var(--green); }
+    .system-event-text.leave { color: var(--red); }
+
+    /* History separator — visually separates loaded history from new messages */
+    .history-divider {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 10px 0;
+    }
+    .history-divider::before,
+    .history-divider::after {
+      content: '';
+      flex: 1;
+      height: 1px;
+      background: var(--border);
+    }
+    .history-divider span {
+      font-size: 10px;
+      color: var(--text-muted);
+      text-transform: uppercase;
+      letter-spacing: 1.5px;
+      white-space: nowrap;
+    }
+
+    .input-area { flex-shrink: 0; display: flex; align-items: center; gap: 10px; padding: 12px 20px; background: var(--bg-surface); border-top: 1px solid var(--border); }
+    .input-prompt { font-size: 13px; color: var(--text-muted); flex-shrink: 0; }
+
+    #message-input { flex: 1; background: transparent; border: none; outline: none; font-family: 'Azeret Mono', monospace; font-size: 13px; color: var(--text-primary); caret-color: var(--accent); }
+    #message-input::placeholder { color: var(--text-muted); }
+    #message-input:disabled { opacity: 0.3; }
+
+    .char-count { font-size: 10px; color: var(--text-muted); flex-shrink: 0; }
+
+    .btn-send { flex-shrink: 0; background: var(--accent); color: white; border: none; border-radius: 6px; padding: 8px 16px; font-family: 'Azeret Mono', monospace; font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 1px; cursor: pointer; transition: background 0.15s; }
+    .btn-send:hover    { background: #1f6feb; }
+    .btn-send:disabled { background: var(--bg-raised); color: var(--text-muted); cursor: not-allowed; }
+
+    .sidebar { width: 200px; flex-shrink: 0; border-left: 1px solid var(--border); background: var(--bg-surface); display: flex; flex-direction: column; overflow: hidden; }
+    .sidebar-header { padding: 14px 16px 10px; border-bottom: 1px solid var(--border); font-size: 10px; color: var(--text-secondary); text-transform: uppercase; letter-spacing: 1.5px; }
+    #user-list { flex: 1; overflow-y: auto; padding: 8px 0; list-style: none; }
+    .user-item { display: flex; align-items: center; gap: 9px; padding: 7px 16px; font-size: 12px; color: var(--text-secondary); }
+    .user-item .online-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--green); box-shadow: 0 0 5px rgba(63,185,80,0.6); flex-shrink: 0; }
+    .user-item.me { color: var(--accent); }
+
+    /* Debug panel */
+    #debug-panel { position: fixed; bottom: 16px; right: 16px; width: 360px; background: #0d1117; border: 1px solid #30363d; border-radius: 10px; font-size: 11px; z-index: 999; box-shadow: 0 8px 32px rgba(0,0,0,0.6); overflow: hidden; }
+    .debug-header { display: flex; align-items: center; justify-content: space-between; padding: 9px 14px; background: #161b22; border-bottom: 1px solid #21262d; cursor: pointer; }
+    .debug-title { color: #e3b341; font-weight: 700; font-size: 10px; text-transform: uppercase; letter-spacing: 1.5px; }
+    .debug-toggle { color: #7d8590; font-size: 10px; }
+    #debug-log { max-height: 220px; overflow-y: auto; padding: 10px 14px; display: flex; flex-direction: column; gap: 3px; }
+    .debug-entry { display: flex; gap: 8px; line-height: 1.5; }
+    .debug-ts  { color: #3fb950; flex-shrink: 0; }
+    .debug-tag { padding: 0 5px; border-radius: 3px; font-weight: 700; flex-shrink: 0; }
+    .debug-tag.ws   { background: #1f3550; color: #388bfd; }
+    .debug-tag.send { background: #1f3d1f; color: #3fb950; }
+    .debug-tag.recv { background: #3d2020; color: #f85149; }
+    .debug-tag.info { background: #2d2a20; color: #e3b341; }
+    .debug-tag.http { background: #2d1f3d; color: #a371f7; }
+    .debug-msg { color: #8b949e; word-break: break-all; }
+  </style>
+</head>
+<body>
+
+<!-- ═══ SCREEN 1 — JOIN ═══ -->
+<div id="join-screen">
+  <div class="join-card">
+    <div class="window-dots">
+      <div class="dot dot-red"></div>
+      <div class="dot dot-yellow"></div>
+      <div class="dot dot-green"></div>
+    </div>
+
+    <h1 class="join-title">chatroom_</h1>
+    <p class="join-subtitle">phase 2 · spring boot backend</p>
+
+    <label class="field-label" for="username-input">your username</label>
+    <input id="username-input" class="field-input" type="text"
+           placeholder="e.g. alice" maxlength="20" autocomplete="off" />
+
+    <!--
+      SERVER URL — PRE-SET TO SPRING BOOT.
+
+      The URL changed from Phase 1:
+        BEFORE: wss://echo.websocket.org
+        AFTER:  ws://localhost:8080/ws/websocket
+
+      WHY /ws/websocket and not just /ws?
+        Spring Boot has SockJS enabled on /ws.
+        SockJS normally negotiates transport by first visiting /ws/info.
+        But our Phase 2 HTML uses raw WebSocket (no SockJS JS library).
+        The /websocket suffix lets raw WebSocket bypass SockJS negotiation
+        and connect directly.
+        In Phase 4, the @stomp/stompjs + SockJS JS library handles this
+        automatically and we go back to just /ws.
+    -->
+    <label class="field-label" for="server-input">websocket server url</label>
+    <input id="server-input" class="field-input" type="text"
+           value="ws://localhost:8080/ws/websocket" autocomplete="off" />
+
+    <button id="join-btn" class="btn-primary">connect → join</button>
+    <p id="error-text" class="error-text"></p>
+  </div>
+</div>
+
+
+<!-- ═══ SCREEN 2 — CHAT ═══ -->
+<div id="chat-screen">
+  <header class="topbar">
+    <div class="topbar-left">
+      <span class="brand"><span>></span> chatroom</span>
+      <span class="phase-badge">phase 2</span>
+      <div class="status-badge">
+        <div id="status-dot" class="status-dot"></div>
+        <span id="status-text">disconnected</span>
+      </div>
+    </div>
+    <div class="topbar-right">
+      <span id="current-user-label" class="current-user"></span>
+      <button id="leave-btn" class="btn-leave">disconnect</button>
+    </div>
+  </header>
+
+  <div class="chat-body">
+    <div class="messages-column">
+      <div id="message-list"></div>
+      <div class="input-area">
+        <span id="input-prompt" class="input-prompt"></span>
+        <input id="message-input" type="text"
+               placeholder="type a message and press Enter..."
+               maxlength="2000" disabled autocomplete="off" />
+        <span id="char-count" class="char-count">0 / 2000</span>
+        <button id="send-btn" class="btn-send" disabled>send</button>
+      </div>
+    </div>
+
+    <aside class="sidebar">
+      <div class="sidebar-header">online — <span id="user-count">0</span></div>
+      <ul id="user-list"></ul>
+    </aside>
+  </div>
+</div>
+
+
+<!-- ═══ DEBUG PANEL ═══ -->
+<div id="debug-panel">
+  <div class="debug-header" id="debug-toggle-btn">
+    <span class="debug-title">⚡ websocket + http events</span>
+    <span class="debug-toggle" id="debug-toggle-label">▼ collapse</span>
+  </div>
+  <div id="debug-log"></div>
+</div>
+
+
+<script>
+  // ═══════════════════════════════════════════════════════════════
+  // STATE — Same as Phase 1. Still plain variables.
+  // In Phase 3 (Vue) these become reactive data properties.
+  // ═══════════════════════════════════════════════════════════════
+  let socket = null;
+  let myUsername = '';
+  let onlineUsers = new Set();
+  let debugCollapsed = false;
+
+  // ═══════════════════════════════════════════════════════════════
+  // DOM REFERENCES — Same as Phase 1.
+  // ═══════════════════════════════════════════════════════════════
+  const joinScreen       = document.getElementById('join-screen');
+  const chatScreen       = document.getElementById('chat-screen');
+  const usernameInput    = document.getElementById('username-input');
+  const serverInput      = document.getElementById('server-input');
+  const joinBtn          = document.getElementById('join-btn');
+  const errorText        = document.getElementById('error-text');
+  const statusDot        = document.getElementById('status-dot');
+  const statusText       = document.getElementById('status-text');
+  const currentUserLabel = document.getElementById('current-user-label');
+  const leaveBtn         = document.getElementById('leave-btn');
+  const messageList      = document.getElementById('message-list');
+  const messageInput     = document.getElementById('message-input');
+  const charCount        = document.getElementById('char-count');
+  const sendBtn          = document.getElementById('send-btn');
+  const inputPrompt      = document.getElementById('input-prompt');
+  const userList         = document.getElementById('user-list');
+  const userCount        = document.getElementById('user-count');
+  const debugLog         = document.getElementById('debug-log');
+  const debugToggleBtn   = document.getElementById('debug-toggle-btn');
+  const debugToggleLabel = document.getElementById('debug-toggle-label');
+
+
+  // ═══════════════════════════════════════════════════════════════
+  // NEW IN PHASE 2: loadHistory()
+  //
+  // Before connecting via WebSocket, we fetch existing messages
+  // from the Spring Boot REST endpoint using the Fetch API.
+  //
+  // fetch() is the modern browser HTTP client.
+  // It returns a Promise — an object that represents a future value.
+  //
+  // async/await makes Promises readable:
+  //   const response = await fetch(url)  -- waits for HTTP response
+  //   const data = await response.json() -- waits for JSON parsing
+  //
+  // Without async/await you'd write:
+  //   fetch(url).then(r => r.json()).then(data => { ... })
+  // Same thing, just harder to read.
+  // ═══════════════════════════════════════════════════════════════
+
+  async function loadHistory() {
+    try {
+      logDebug('http', 'GET /api/messages — loading history');
+
+      /**
+       * fetch('/api/messages') relative to the current page origin.
+       * If this HTML is opened from the filesystem (file:///...),
+       * the origin is null and fetch goes to localhost:8080.
+       *
+       * Actually: since we opened the file directly, we need the full URL.
+       * We construct it from the server input field base URL.
+       */
+      const serverBase = serverInput.value
+        .replace('ws://', 'http://')
+        .replace('wss://', 'https://')
+        .replace('/ws/websocket', '');
+
+      const response = await fetch(serverBase + '/api/messages');
+
+      /**
+       * response.ok — true if HTTP status is 200-299.
+       * If the server returned 404, 500, etc., we throw an error.
+       */
+      if (!response.ok) {
+        throw new Error('HTTP ' + response.status);
+      }
+
+      /**
+       * response.json() — Parses the response body as JSON.
+       * Returns an array of ChatMessage objects:
+       * [
+       *   { id: 1, content: "Hello", sender: "alice", type: "CHAT", sentAt: "..." },
+       *   { id: 2, content: "alice joined", sender: "alice", type: "JOIN", sentAt: "..." },
+       *   ...
+       * ]
+       */
+      const messages = await response.json();
+      logDebug('http', 'received ' + messages.length + ' historical messages');
+
+      if (messages.length > 0) {
+        // Show a divider so users can tell history from new messages
+        appendHistoryDivider('chat history (' + messages.length + ' messages)');
+
+        // Render each historical message
+        messages.forEach(function(msg) {
+          if (msg.type === 'CHAT') {
+            const isMine = (msg.sender === myUsername);
+            appendChatMessage(msg.sender, msg.content, msg.sentAt, isMine);
+          } else if (msg.type === 'JOIN' || msg.type === 'LEAVE') {
+            const cls = msg.type === 'JOIN' ? 'join' : 'leave';
+            appendSystemMessage(msg.content, cls);
+          }
+        });
+
+        appendHistoryDivider('live messages ↓');
+      }
+
+    } catch (error) {
+      logDebug('info', 'history load failed: ' + error.message + ' (starting fresh)');
+      // Not fatal — history is nice to have, not required
+    }
+  }
+
+
+  // ═══════════════════════════════════════════════════════════════
+  // WEBSOCKET FUNCTIONS
+  //
+  // The raw WebSocket API is IDENTICAL to Phase 1.
+  // The only difference is WHERE we connect to.
+  //
+  // Phase 1: wss://echo.websocket.org — just echoes back to you
+  // Phase 2: ws://localhost:8080/ws/websocket — Spring Boot broker
+  //          broadcasts to ALL subscribers
+  // ═══════════════════════════════════════════════════════════════
+
+  async function connect(url, username) {
+    logDebug('ws', 'connecting to ' + url);
+    setStatus('connecting');
+
+    // Load history BEFORE connecting WebSocket
+    // This way historical messages appear before live ones
+    await loadHistory();
+
+    socket = new WebSocket(url);
+
+    socket.onopen = function(event) {
+      logDebug('ws', 'connected to Spring Boot (HTTP 101)');
+      setStatus('connected');
+
+      joinScreen.style.display = 'none';
+      chatScreen.style.display = 'flex';
+      currentUserLabel.textContent = username;
+      inputPrompt.textContent = username + ' >';
+
+      onlineUsers.add(username);
+      renderUserList();
+
+      messageInput.disabled = false;
+      sendBtn.disabled = false;
+      messageInput.focus();
+
+      /**
+       * NEW IN PHASE 2: Announce ourselves via /app/chat.addUser
+       *
+       * In Phase 1 we broadcast a JOIN to the echo server — it just
+       * came back to us. Nobody else saw it.
+       *
+       * In Phase 2:
+       *   1. We send to the Spring Boot server
+       *   2. Spring routes to ChatController.addUser() via @MessageMapping
+       *   3. addUser() saves it to H2 and broadcasts to /topic/chatroom
+       *   4. ALL connected clients receive the JOIN notification
+       *
+       * The destination format:
+       *   /app/chat.addUser
+       *   └─── /app = applicationDestinationPrefix (from WebSocketConfig)
+       *              Spring strips this prefix before matching @MessageMapping
+       *
+       * But wait — we're using raw WebSocket, not STOMP.
+       * Raw WebSocket doesn't know about STOMP destinations.
+       * We're sending raw JSON, not a STOMP SEND frame.
+       *
+       * PROBLEM: Spring Boot expects STOMP frames, not raw JSON.
+       * Our raw WebSocket will connect but the messages won't be
+       * routed by @MessageMapping because there's no STOMP framing.
+       *
+       * THIS IS THE KEY LESSON OF PHASE 2:
+       * The connection works (HTTP 101 upgrade succeeds).
+       * But message ROUTING requires STOMP protocol on top.
+       * That's exactly what Phase 4 fixes with @stomp/stompjs.
+       *
+       * For Phase 2, we're demonstrating the connection layer.
+       * We'll see the gap that STOMP fills. This is intentional.
+       */
+      sendRawMessage('JOIN', username + ' joined the chat');
+      appendSystemMessage('you joined · ' + new Date().toLocaleTimeString(), 'join');
+    };
+
+    socket.onmessage = function(event) {
+      logDebug('recv', event.data);
+      let message;
+      try {
+        message = JSON.parse(event.data);
+      } catch (e) {
+        logDebug('info', 'non-JSON message, ignoring');
+        return;
+      }
+
+      if (message.type === 'CHAT')       handleChatMessage(message);
+      else if (message.type === 'JOIN')  handleJoinMessage(message);
+      else if (message.type === 'LEAVE') handleLeaveMessage(message);
+    };
+
+    socket.onerror = function(event) {
+      logDebug('ws', 'error — is Spring Boot running on port 8080?');
+      showError('Cannot connect. Is Spring Boot running? Start it in IntelliJ first.');
+    };
+
+    socket.onclose = function(event) {
+      logDebug('ws', 'closed — code: ' + event.code + ', clean: ' + event.wasClean);
+      setStatus('disconnected');
+      messageInput.disabled = true;
+      sendBtn.disabled = true;
+      socket = null;
+      if (chatScreen.style.display === 'flex') {
+        appendSystemMessage('disconnected from server (code ' + event.code + ')', 'leave');
+      }
+    };
+  }
+
+  /**
+   * sendRawMessage() — Sends raw JSON over WebSocket.
+   *
+   * In Phase 4, this becomes stompClient.publish({ destination, body })
+   * which wraps the JSON in a proper STOMP SEND frame with headers.
+   * Spring's @MessageMapping then routes it correctly.
+   *
+   * In Phase 2, we send raw JSON. Spring receives it but can't route
+   * it via @MessageMapping because there's no STOMP destination header.
+   * The connection works, routing doesn't — that's the lesson.
+   */
+  function sendRawMessage(type, content) {
+    if (!socket || socket.readyState !== WebSocket.OPEN) return;
+    const msg = {
+      type: type,
+      sender: myUsername,
+      content: content,
+      sentAt: new Date().toISOString()
+    };
+    const json = JSON.stringify(msg);
+    logDebug('send', json);
+    socket.send(json);
+  }
+
+  function sendMessage(content) {
+    sendRawMessage('CHAT', content);
+  }
+
+  function disconnect() {
+    if (socket) {
+      sendRawMessage('LEAVE', myUsername + ' left the chat');
+      socket.close(1000, 'User left');
+    }
+    chatScreen.style.display = 'none';
+    joinScreen.style.display = 'flex';
+    onlineUsers.clear();
+    messageList.innerHTML = '';
+    userList.innerHTML = '';
+    userCount.textContent = '0';
+    messageInput.disabled = true;
+    sendBtn.disabled = true;
+    setStatus('disconnected');
+  }
+
+
+  // ═══════════════════════════════════════════════════════════════
+  // MESSAGE HANDLERS — identical to Phase 1
+  // ═══════════════════════════════════════════════════════════════
+
+  function handleChatMessage(message) {
+    appendChatMessage(message.sender, message.content, message.sentAt, message.sender === myUsername);
+  }
+
+  function handleJoinMessage(message) {
+    if (message.sender === myUsername) return;
+    onlineUsers.add(message.sender);
+    renderUserList();
+    appendSystemMessage(message.content, 'join');
+  }
+
+  function handleLeaveMessage(message) {
+    onlineUsers.delete(message.sender);
+    renderUserList();
+    appendSystemMessage(message.content, 'leave');
+  }
+
+
+  // ═══════════════════════════════════════════════════════════════
+  // DOM MANIPULATION — Same as Phase 1, plus appendHistoryDivider
+  // ═══════════════════════════════════════════════════════════════
+
+  function appendChatMessage(sender, content, sentAt, isMine) {
+    const wrapper = document.createElement('div');
+    wrapper.className = 'message ' + (isMine ? 'mine' : 'theirs');
+
+    const avatar = document.createElement('div');
+    avatar.className = 'avatar';
+    avatar.style.background = getAvatarColor(sender);
+    avatar.style.color = '#ffffff';
+    avatar.textContent = sender.charAt(0).toUpperCase();
+
+    const body = document.createElement('div');
+    body.className = 'message-body';
+
+    const meta = document.createElement('div');
+    meta.className = 'message-meta';
+
+    const senderEl = document.createElement('span');
+    senderEl.className = 'message-sender';
+    senderEl.textContent = isMine ? 'you' : sender;
+
+    const timeEl = document.createElement('span');
+    timeEl.className = 'message-time';
+    timeEl.textContent = formatTime(sentAt);
+
+    meta.appendChild(senderEl);
+    meta.appendChild(timeEl);
+
+    const bubble = document.createElement('div');
+    bubble.className = 'bubble';
+    bubble.textContent = content; // textContent not innerHTML — XSS safe
+
+    body.appendChild(meta);
+    body.appendChild(bubble);
+    wrapper.appendChild(avatar);
+    wrapper.appendChild(body);
+
+    messageList.appendChild(wrapper);
+    scrollToBottom();
+  }
+
+  function appendSystemMessage(text, type) {
+    const wrapper = document.createElement('div');
+    wrapper.className = 'system-event';
+    const pill = document.createElement('span');
+    pill.className = 'system-event-text ' + (type || '');
+    pill.textContent = text;
+    wrapper.appendChild(pill);
+    messageList.appendChild(wrapper);
+    scrollToBottom();
+  }
+
+  /**
+   * appendHistoryDivider() — NEW IN PHASE 2.
+   *
+   * Visually separates loaded history from live messages.
+   * Without this, users can't tell which messages are old vs new.
+   */
+  function appendHistoryDivider(label) {
+    const divider = document.createElement('div');
+    divider.className = 'history-divider';
+    const span = document.createElement('span');
+    span.textContent = label;
+    divider.appendChild(span);
+    messageList.appendChild(divider);
+  }
+
+  function renderUserList() {
+    userList.innerHTML = '';
+    userCount.textContent = onlineUsers.size;
+    onlineUsers.forEach(function(username) {
+      const li = document.createElement('li');
+      li.className = 'user-item' + (username === myUsername ? ' me' : '');
+      const dot = document.createElement('div');
+      dot.className = 'online-dot';
+      const name = document.createElement('span');
+      name.textContent = username + (username === myUsername ? ' (you)' : '');
+      li.appendChild(dot);
+      li.appendChild(name);
+      userList.appendChild(li);
+    });
+  }
+
+  function scrollToBottom() {
+    messageList.scrollTo({ top: messageList.scrollHeight, behavior: 'smooth' });
+  }
+
+  function setStatus(status) {
+    statusDot.className = 'status-dot ' + status;
+    statusText.textContent = status;
+  }
+
+  function showError(message) {
+    errorText.style.display = 'block';
+    errorText.textContent = message;
+  }
+
+  function hideError() {
+    errorText.style.display = 'none';
+    errorText.textContent = '';
+  }
+
+  function formatTime(isoString) {
+    if (!isoString) return '';
+    try { return new Date(isoString).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }); }
+    catch (e) { return ''; }
+  }
+
+  function getAvatarColor(username) {
+    const colors = ['#1f4068','#1b4332','#3d1a78','#5c2018','#1a3a4a','#2d4a1e','#4a1a2e','#1a3d3d'];
+    return colors[(username.charCodeAt(0) || 0) % colors.length];
+  }
+
+  function logDebug(tag, msg) {
+    const entry = document.createElement('div');
+    entry.className = 'debug-entry';
+    const ts = document.createElement('span');
+    ts.className = 'debug-ts';
+    ts.textContent = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+    const tagEl = document.createElement('span');
+    tagEl.className = 'debug-tag ' + tag;
+    tagEl.textContent = tag.toUpperCase();
+    const msgEl = document.createElement('span');
+    msgEl.className = 'debug-msg';
+    msgEl.textContent = msg.length > 140 ? msg.substring(0, 140) + '...' : msg;
+    entry.appendChild(ts);
+    entry.appendChild(tagEl);
+    entry.appendChild(msgEl);
+    debugLog.appendChild(entry);
+    debugLog.scrollTop = debugLog.scrollHeight;
+  }
+
+
+  // ═══════════════════════════════════════════════════════════════
+  // EVENT LISTENERS — Same as Phase 1
+  // ═══════════════════════════════════════════════════════════════
+
+  joinBtn.addEventListener('click', function() {
+    const username = usernameInput.value.trim();
+    const serverUrl = serverInput.value.trim();
+
+    if (!username) { showError('Please enter a username.'); return; }
+    if (!serverUrl) { showError('Please enter a WebSocket server URL.'); return; }
+    if (!serverUrl.startsWith('ws://') && !serverUrl.startsWith('wss://')) {
+      showError('URL must start with ws:// or wss://'); return;
+    }
+
+    hideError();
+    myUsername = username;
+    joinBtn.disabled = true;
+    joinBtn.textContent = 'connecting...';
+
+    connect(serverUrl, username);
+
+    setTimeout(function() {
+      joinBtn.disabled = false;
+      joinBtn.textContent = 'connect → join';
+    }, 5000);
+  });
+
+  usernameInput.addEventListener('keyup', function(e) { if (e.key === 'Enter') joinBtn.click(); });
+  serverInput.addEventListener('keyup',   function(e) { if (e.key === 'Enter') joinBtn.click(); });
+  leaveBtn.addEventListener('click', disconnect);
+
+  sendBtn.addEventListener('click', function() {
+    const content = messageInput.value.trim();
+    if (!content) return;
+    sendMessage(content);
+    messageInput.value = '';
+    charCount.textContent = '0 / 2000';
+    messageInput.focus();
+  });
+
+  messageInput.addEventListener('keyup',  function(e) { if (e.key === 'Enter') sendBtn.click(); });
+  messageInput.addEventListener('input',  function()  { charCount.textContent = this.value.length + ' / 2000'; });
+
+  debugToggleBtn.addEventListener('click', function() {
+    debugCollapsed = !debugCollapsed;
+    debugLog.style.display = debugCollapsed ? 'none' : 'flex';
+    debugToggleLabel.textContent = debugCollapsed ? '▶ expand' : '▼ collapse';
+  });
+
+  window.addEventListener('beforeunload', function() {
+    if (socket) { sendRawMessage('LEAVE', myUsername + ' left'); socket.close(1000, 'Page unloaded'); }
+  });
+
+  // Initial debug messages explaining Phase 2
+  logDebug('info', 'Phase 2 — Spring Boot backend required');
+  logDebug('info', 'Start Spring Boot in IntelliJ first, then connect');
+  logDebug('info', 'Server: ws://localhost:8080/ws/websocket');
+  logDebug('info', 'Note: raw WS connects OK but STOMP routing comes in Phase 4');
+</script>
+
+</body>
+</html>
