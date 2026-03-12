@@ -3,94 +3,105 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Chatroom — Phase 1</title>
+  <title>Chatroom — STOMP</title>
 
   <!--
     ═══════════════════════════════════════════════════════════════
-    PHASE 1: Plain HTML + Vanilla JavaScript
-    No frameworks. No npm. No build tools. Just open this file.
+    STEP 1: STOMP + SockJS Frontend
     ═══════════════════════════════════════════════════════════════
 
-    WHAT THIS PHASE TEACHES:
-      - The raw browser WebSocket API (new WebSocket(), .send(), .onmessage)
-      - What a WebSocket connection lifecycle actually looks like
-      - How to manually update the DOM when messages arrive
-      - What "state" means before any framework manages it for you
+    WHAT CHANGED FROM PHASE 2:
+      - Replaced raw new WebSocket() with @stomp/stompjs Client
+      - Replaced socket.send() with stompClient.publish()
+      - Replaced socket.onmessage with stompClient.subscribe()
+      - Server URL goes back to ws://localhost:8080/ws (not /ws/websocket)
+        because SockJS handles the transport negotiation now
 
-    IN LATER PHASES we replace each manual piece with a framework tool:
-      Phase 3: DOM manipulation → Vue's reactive templates
-      Phase 4: <script> state variables → Pinia stores
-      Phase 5: manual auth check → Spring Security + auth guard
+    WHY THIS MAKES EVERYTHING WORK:
+      Raw WebSocket just sends bytes down a pipe.
+      Spring Boot's @MessageMapping needs a STOMP SEND frame which looks like:
 
-    Google Font: "Azeret Mono" — a distinctive monospaced font for a
-    terminal/signal aesthetic that matches the real-time, raw nature of Phase 1.
+        SEND
+        destination:/app/chat.send
+        content-type:application/json
+
+        {"content":"Hello","sender":"alice","type":"CHAT"}
+
+      Without the destination header, Spring has no idea where
+      to route the message. @MessageMapping never fires.
+      STOMP adds that header automatically.
+
+    THE TWO LIBRARIES WE LOAD FROM CDN:
+      1. SockJS   — handles transport (WebSocket → HTTP fallback)
+      2. @stomp/stompjs — handles STOMP protocol framing on top of SockJS
+
+      We load them from cdnjs.cloudflare.com — no npm needed.
+      In Phase 4 (Vue + Vite) we'll install them properly via npm.
+      For now, CDN is perfect.
   -->
+
+  <!--
+    SockJS client — transport layer
+    Tries native WebSocket first. Falls back to HTTP streaming,
+    then long-polling if WebSocket is blocked.
+    Connects to our Spring Boot /ws SockJS endpoint.
+  -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/sockjs-client/1.6.1/sockjs.min.js"></script>
+
+  <!--
+    @stomp/stompjs — STOMP protocol layer on top of SockJS
+    Handles: CONNECT frame, SEND frame, SUBSCRIBE frame,
+    heartbeats, automatic reconnection, JSON serialization.
+  -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/stomp.js/2.3.3/stomp.min.js"></script>
+
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link href="https://fonts.googleapis.com/css2?family=Azeret+Mono:wght@300;400;500;700&display=swap" rel="stylesheet">
 
   <style>
-    /* ─────────────────────────────────────────────────────────────
-       CSS CUSTOM PROPERTIES (variables)
-       Define the entire color palette once here.
-       If you want to change the accent color, change ONE line.
-    ───────────────────────────────────────────────────────────── */
+    /*
+      CSS IS IDENTICAL TO PHASE 1 AND 2.
+      Visual design does not change when we fix the transport layer.
+      This separation (presentation vs logic) is intentional.
+    */
     :root {
-      --bg-base:       #080c10;   /* deepest background */
-      --bg-surface:    #0d1117;   /* card / panel background */
-      --bg-raised:     #161b22;   /* input fields, hover states */
-      --border:        #21262d;   /* subtle borders */
-      --border-focus:  #388bfd;   /* focused input border */
-      --accent:        #388bfd;   /* primary blue accent */
-      --accent-dim:    #1f3550;   /* muted accent for my-message bubble */
-      --text-primary:  #e6edf3;   /* main readable text */
-      --text-secondary:#7d8590;   /* timestamps, labels */
-      --text-muted:    #30363d;   /* very subtle — placeholders, dividers */
-      --green:         #3fb950;   /* online dot, JOIN events */
-      --red:           #f85149;   /* LEAVE events */
-      --my-bubble:     #132032;   /* background of my own messages */
-      --their-bubble:  #161b22;   /* background of others' messages */
+      --bg-base:       #080c10;
+      --bg-surface:    #0d1117;
+      --bg-raised:     #161b22;
+      --border:        #21262d;
+      --border-focus:  #388bfd;
+      --accent:        #388bfd;
+      --text-primary:  #e6edf3;
+      --text-secondary:#7d8590;
+      --text-muted:    #30363d;
+      --green:         #3fb950;
+      --red:           #f85149;
+      --my-bubble:     #132032;
+      --their-bubble:  #161b22;
     }
 
-    /* ─────────────────────────────────────────────────────────────
-       RESET & BASE
-       Remove browser default padding/margin. Box-sizing: border-box
-       means padding is included in declared width/height (avoids math).
-    ───────────────────────────────────────────────────────────── */
-    *, *::before, *::after {
-      box-sizing: border-box;
-      margin: 0;
-      padding: 0;
-    }
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
     html, body {
-      height: 100%;                  /* full viewport height */
+      height: 100%;
       font-family: 'Azeret Mono', monospace;
       font-size: 14px;
       background: var(--bg-base);
       color: var(--text-primary);
-      /* Prevent the page from scrolling — the message list scrolls internally */
       overflow: hidden;
     }
 
-    /* Custom scrollbar — thin, styled to match the theme */
     ::-webkit-scrollbar { width: 4px; }
     ::-webkit-scrollbar-track { background: transparent; }
     ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
     ::-webkit-scrollbar-thumb:hover { background: var(--accent); }
 
-    /* ─────────────────────────────────────────────────────────────
-       ░░░  SCREEN 1: JOIN SCREEN  ░░░
-       Shown first — user picks a username and connects.
-       Hidden once they join (display:none).
-    ───────────────────────────────────────────────────────────── */
     #join-screen {
       height: 100vh;
       display: flex;
       align-items: center;
       justify-content: center;
-      /* Subtle dot-grid background pattern using CSS gradients only */
-      background-image:
-        radial-gradient(circle, #21262d 1px, transparent 1px);
+      background-image: radial-gradient(circle, #21262d 1px, transparent 1px);
       background-size: 32px 32px;
     }
 
@@ -101,491 +112,189 @@
       padding: 40px 36px;
       width: 100%;
       max-width: 400px;
-      /* Soft glow shadow matching the accent color */
       box-shadow: 0 0 0 1px var(--border), 0 20px 60px rgba(0,0,0,0.6);
     }
 
-    /* Terminal "window chrome" — the three dots at the top of macOS windows */
-    .window-dots {
-      display: flex;
-      gap: 7px;
-      margin-bottom: 28px;
-    }
-    .dot {
-      width: 12px;
-      height: 12px;
-      border-radius: 50%;
-    }
+    .window-dots { display: flex; gap: 7px; margin-bottom: 28px; }
+    .dot { width: 12px; height: 12px; border-radius: 50%; }
     .dot-red    { background: #ff5f57; }
     .dot-yellow { background: #febc2e; }
     .dot-green  { background: #28c840; }
 
-    .join-title {
-      font-size: 22px;
-      font-weight: 700;
-      color: var(--text-primary);
-      margin-bottom: 6px;
-      letter-spacing: -0.5px;
-    }
+    .join-title    { font-size: 22px; font-weight: 700; color: var(--text-primary); margin-bottom: 6px; letter-spacing: -0.5px; }
+    .join-subtitle { font-size: 12px; color: var(--text-secondary); margin-bottom: 28px; letter-spacing: 0.5px; text-transform: uppercase; }
 
-    .join-subtitle {
-      font-size: 12px;
-      color: var(--text-secondary);
-      margin-bottom: 28px;
-      letter-spacing: 0.5px;
-      text-transform: uppercase;
-    }
-
-    /* Labels above inputs */
     .field-label {
-      display: block;
-      font-size: 11px;
-      color: var(--accent);
-      text-transform: uppercase;
-      letter-spacing: 1.5px;
-      margin-bottom: 8px;
+      display: block; font-size: 11px; color: var(--accent);
+      text-transform: uppercase; letter-spacing: 1.5px; margin-bottom: 8px;
     }
-
-    /* Text input field */
     .field-input {
-      width: 100%;
-      background: var(--bg-base);
-      border: 1px solid var(--border);
-      border-radius: 8px;
-      padding: 11px 14px;
-      font-family: 'Azeret Mono', monospace;
-      font-size: 14px;
-      color: var(--text-primary);
-      outline: none;
-      transition: border-color 0.15s, box-shadow 0.15s;
-      margin-bottom: 20px;
+      width: 100%; background: var(--bg-base); border: 1px solid var(--border);
+      border-radius: 8px; padding: 11px 14px; font-family: 'Azeret Mono', monospace;
+      font-size: 14px; color: var(--text-primary); outline: none;
+      transition: border-color 0.15s, box-shadow 0.15s; margin-bottom: 20px;
     }
     .field-input::placeholder { color: var(--text-muted); }
-    .field-input:focus {
-      border-color: var(--border-focus);
-      /* Subtle glow on focus — lets the user know which field is active */
-      box-shadow: 0 0 0 3px rgba(56,139,253,0.12);
-    }
+    .field-input:focus { border-color: var(--border-focus); box-shadow: 0 0 0 3px rgba(56,139,253,0.12); }
 
-    /* Primary button */
     .btn-primary {
-      width: 100%;
-      background: var(--accent);
-      color: #ffffff;
-      border: none;
-      border-radius: 8px;
-      padding: 12px;
-      font-family: 'Azeret Mono', monospace;
-      font-size: 13px;
-      font-weight: 700;
-      letter-spacing: 1px;
-      text-transform: uppercase;
-      cursor: pointer;
-      transition: background 0.15s, transform 0.1s;
+      width: 100%; background: var(--accent); color: #fff; border: none;
+      border-radius: 8px; padding: 12px; font-family: 'Azeret Mono', monospace;
+      font-size: 13px; font-weight: 700; letter-spacing: 1px; text-transform: uppercase;
+      cursor: pointer; transition: background 0.15s, transform 0.1s;
     }
     .btn-primary:hover  { background: #1f6feb; }
     .btn-primary:active { transform: scale(0.98); }
-    .btn-primary:disabled {
-      background: var(--bg-raised);
-      color: var(--text-muted);
-      cursor: not-allowed;
-    }
+    .btn-primary:disabled { background: var(--bg-raised); color: var(--text-muted); cursor: not-allowed; }
 
-    /* Error text shown when connection fails */
-    .error-text {
-      color: var(--red);
-      font-size: 12px;
-      margin-top: 12px;
-      display: none;  /* hidden by default, shown via JS */
-    }
+    .error-text { color: var(--red); font-size: 12px; margin-top: 12px; display: none; }
 
-    /* ─────────────────────────────────────────────────────────────
-       ░░░  SCREEN 2: CHAT SCREEN  ░░░
-       Hidden initially, shown after joining.
-       Layout: top bar + two columns (messages + sidebar).
-    ───────────────────────────────────────────────────────────── */
-    #chat-screen {
-      height: 100vh;
-      display: none;              /* hidden until connected */
-      flex-direction: column;
-    }
+    #chat-screen { height: 100vh; display: none; flex-direction: column; }
 
-    /* ── TOP BAR ── */
     .topbar {
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      padding: 0 20px;
-      height: 52px;
-      background: var(--bg-surface);
-      border-bottom: 1px solid var(--border);
-      /* shrink-0 equivalent — don't let the topbar compress */
-      flex-shrink: 0;
+      display: flex; align-items: center; justify-content: space-between;
+      padding: 0 20px; height: 52px; background: var(--bg-surface);
+      border-bottom: 1px solid var(--border); flex-shrink: 0;
     }
+    .topbar-left  { display: flex; align-items: center; gap: 16px; }
+    .topbar-right { display: flex; align-items: center; gap: 14px; }
 
-    .topbar-left {
-      display: flex;
-      align-items: center;
-      gap: 16px;
-    }
-
-    .brand {
-      font-size: 15px;
-      font-weight: 700;
-      color: var(--text-primary);
-      letter-spacing: -0.3px;
-    }
+    .brand { font-size: 15px; font-weight: 700; color: var(--text-primary); letter-spacing: -0.3px; }
     .brand span { color: var(--accent); }
 
-    /* WebSocket connection status badge */
-    .status-badge {
-      display: flex;
-      align-items: center;
-      gap: 6px;
-      font-size: 11px;
-      color: var(--text-secondary);
-      text-transform: uppercase;
+    .phase-badge {
+      font-size: 10px; background: rgba(56,139,253,0.1); color: var(--accent);
+      padding: 2px 8px; border-radius: 100px; border: 1px solid rgba(56,139,253,0.3);
       letter-spacing: 1px;
     }
-    .status-dot {
-      width: 7px;
-      height: 7px;
-      border-radius: 50%;
-      background: var(--text-muted);  /* grey = disconnected */
-      transition: background 0.3s;
-    }
-    /* JavaScript will add/remove these classes to change status */
-    .status-dot.connected    { background: var(--green); box-shadow: 0 0 6px rgba(63,185,80,0.6); }
-    .status-dot.connecting   { background: #e3b341; animation: pulse 1s infinite; }
-    .status-dot.disconnected { background: var(--red); }
 
-    @keyframes pulse {
-      0%, 100% { opacity: 1; }
-      50%       { opacity: 0.3; }
-    }
+    .status-badge { display: flex; align-items: center; gap: 6px; font-size: 11px; color: var(--text-secondary); text-transform: uppercase; letter-spacing: 1px; }
+    .status-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--text-muted); transition: background 0.3s; }
+    .status-dot.connected  { background: var(--green); box-shadow: 0 0 6px rgba(63,185,80,0.6); }
+    .status-dot.connecting { background: #e3b341; animation: pulse 1s infinite; }
+    .status-dot.error      { background: var(--red); }
 
-    .topbar-right {
-      display: flex;
-      align-items: center;
-      gap: 14px;
-    }
+    @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.3; } }
 
-    /* Shows "logged in as: alice" */
-    .current-user {
-      font-size: 12px;
-      color: var(--accent);
-    }
-
+    .current-user { font-size: 12px; color: var(--accent); }
     .btn-leave {
-      font-family: 'Azeret Mono', monospace;
-      font-size: 11px;
-      color: var(--text-secondary);
-      background: transparent;
-      border: 1px solid var(--border);
-      border-radius: 6px;
-      padding: 5px 12px;
-      cursor: pointer;
-      text-transform: uppercase;
-      letter-spacing: 1px;
+      font-family: 'Azeret Mono', monospace; font-size: 11px; color: var(--text-secondary);
+      background: transparent; border: 1px solid var(--border); border-radius: 6px;
+      padding: 5px 12px; cursor: pointer; text-transform: uppercase; letter-spacing: 1px;
       transition: color 0.15s, border-color 0.15s;
     }
-    .btn-leave:hover {
-      color: var(--red);
-      border-color: var(--red);
-    }
+    .btn-leave:hover { color: var(--red); border-color: var(--red); }
 
-    /* ── MAIN AREA (below topbar) ── */
-    .chat-body {
-      display: flex;
-      flex: 1;
-      overflow: hidden; /* children handle their own scroll */
-    }
+    .chat-body { display: flex; flex: 1; overflow: hidden; }
+    .messages-column { display: flex; flex-direction: column; flex: 1; overflow: hidden; }
 
-    /* ── MESSAGE COLUMN ── */
-    .messages-column {
-      display: flex;
-      flex-direction: column;
-      flex: 1;
-      overflow: hidden;
-    }
-
-    /* The scrollable message list */
     #message-list {
-      flex: 1;
-      overflow-y: auto;
-      padding: 16px 20px;
-      display: flex;
-      flex-direction: column;
-      gap: 2px;
+      flex: 1; overflow-y: auto; padding: 16px 20px;
+      display: flex; flex-direction: column; gap: 2px;
     }
 
-    /* ── Individual message bubbles ── */
-    .message {
-      display: flex;
-      gap: 10px;
-      padding: 4px 6px;
-      border-radius: 8px;
-      transition: background 0.1s;
-    }
+    .message { display: flex; gap: 10px; padding: 4px 6px; border-radius: 8px; transition: background 0.1s; }
     .message:hover { background: rgba(255,255,255,0.02); }
+    .message.mine  { flex-direction: row-reverse; }
 
-    /* My own messages are right-aligned */
-    .message.mine {
-      flex-direction: row-reverse;
-    }
-
-    /* Avatar circle — first letter of username */
     .avatar {
-      width: 32px;
-      height: 32px;
-      border-radius: 8px;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      font-size: 13px;
-      font-weight: 700;
-      flex-shrink: 0;
-      margin-top: 2px;
+      width: 32px; height: 32px; border-radius: 8px; display: flex;
+      align-items: center; justify-content: center; font-size: 13px;
+      font-weight: 700; flex-shrink: 0; margin-top: 2px;
     }
 
-    .message-body {
-      display: flex;
-      flex-direction: column;
-      max-width: 68%;
-    }
-
+    .message-body { display: flex; flex-direction: column; max-width: 68%; }
     .message.mine .message-body { align-items: flex-end; }
 
-    /* Username + timestamp row above the bubble */
-    .message-meta {
-      display: flex;
-      align-items: baseline;
-      gap: 8px;
-      margin-bottom: 4px;
-    }
+    .message-meta { display: flex; align-items: baseline; gap: 8px; margin-bottom: 4px; }
     .message.mine .message-meta { flex-direction: row-reverse; }
+    .message-sender { font-size: 12px; font-weight: 700; color: var(--accent); }
+    .message-time   { font-size: 10px; color: var(--text-muted); }
 
-    .message-sender {
-      font-size: 12px;
-      font-weight: 700;
-      color: var(--accent);
-    }
-    .message-time {
-      font-size: 10px;
-      color: var(--text-muted);
-    }
+    .bubble { padding: 9px 13px; border-radius: 12px; font-size: 13px; line-height: 1.55; color: var(--text-primary); word-break: break-word; }
+    .message.mine   .bubble { background: var(--my-bubble);    border-radius: 12px 4px 12px 12px; }
+    .message.theirs .bubble { background: var(--their-bubble); border-radius: 4px 12px 12px 12px; }
 
-    /* The actual text bubble */
-    .bubble {
-      padding: 9px 13px;
-      border-radius: 12px;
-      font-size: 13px;
-      line-height: 1.55;
-      color: var(--text-primary);
-      word-break: break-word;
-    }
-    .message.mine    .bubble { background: var(--my-bubble);    border-radius: 12px 4px 12px 12px; }
-    .message.theirs  .bubble { background: var(--their-bubble); border-radius: 4px 12px 12px 12px; }
-
-    /* ── System events (JOIN / LEAVE) ── */
-    .system-event {
-      display: flex;
-      justify-content: center;
-      padding: 6px 0;
-    }
+    .system-event { display: flex; justify-content: center; padding: 6px 0; }
     .system-event-text {
-      font-size: 11px;
-      color: var(--text-muted);
-      background: var(--bg-surface);
-      border: 1px solid var(--border);
-      border-radius: 100px;
-      padding: 3px 14px;
+      font-size: 11px; color: var(--text-muted); background: var(--bg-surface);
+      border: 1px solid var(--border); border-radius: 100px; padding: 3px 14px;
     }
     .system-event-text.join  { color: var(--green); }
     .system-event-text.leave { color: var(--red); }
 
-    /* ── INPUT AREA ── */
-    .input-area {
-      flex-shrink: 0;
-      display: flex;
-      align-items: center;
-      gap: 10px;
-      padding: 12px 20px;
-      background: var(--bg-surface);
-      border-top: 1px solid var(--border);
-    }
+    .history-divider { display: flex; align-items: center; gap: 10px; padding: 10px 0; }
+    .history-divider::before,
+    .history-divider::after { content: ''; flex: 1; height: 1px; background: var(--border); }
+    .history-divider span { font-size: 10px; color: var(--text-muted); text-transform: uppercase; letter-spacing: 1.5px; white-space: nowrap; }
 
-    .input-prompt {
-      font-size: 13px;
-      color: var(--text-muted);
-      flex-shrink: 0;
-      /* "alice >" label before the input */
+    .input-area {
+      flex-shrink: 0; display: flex; align-items: center; gap: 10px;
+      padding: 12px 20px; background: var(--bg-surface); border-top: 1px solid var(--border);
     }
+    .input-prompt { font-size: 13px; color: var(--text-muted); flex-shrink: 0; }
 
     #message-input {
-      flex: 1;
-      background: transparent;
-      border: none;
-      outline: none;
-      font-family: 'Azeret Mono', monospace;
-      font-size: 13px;
-      color: var(--text-primary);
-      caret-color: var(--accent);
+      flex: 1; background: transparent; border: none; outline: none;
+      font-family: 'Azeret Mono', monospace; font-size: 13px;
+      color: var(--text-primary); caret-color: var(--accent);
     }
     #message-input::placeholder { color: var(--text-muted); }
     #message-input:disabled { opacity: 0.3; }
 
-    .char-count {
-      font-size: 10px;
-      color: var(--text-muted);
-      flex-shrink: 0;
-    }
+    .char-count { font-size: 10px; color: var(--text-muted); flex-shrink: 0; }
 
     .btn-send {
-      flex-shrink: 0;
-      background: var(--accent);
-      color: white;
-      border: none;
-      border-radius: 6px;
-      padding: 8px 16px;
-      font-family: 'Azeret Mono', monospace;
-      font-size: 11px;
-      font-weight: 700;
-      text-transform: uppercase;
-      letter-spacing: 1px;
-      cursor: pointer;
-      transition: background 0.15s;
+      flex-shrink: 0; background: var(--accent); color: white; border: none;
+      border-radius: 6px; padding: 8px 16px; font-family: 'Azeret Mono', monospace;
+      font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 1px;
+      cursor: pointer; transition: background 0.15s;
     }
     .btn-send:hover    { background: #1f6feb; }
-    .btn-send:disabled {
-      background: var(--bg-raised);
-      color: var(--text-muted);
-      cursor: not-allowed;
-    }
+    .btn-send:disabled { background: var(--bg-raised); color: var(--text-muted); cursor: not-allowed; }
 
-    /* ── SIDEBAR ── */
     .sidebar {
-      width: 200px;
-      flex-shrink: 0;
-      border-left: 1px solid var(--border);
-      background: var(--bg-surface);
-      display: flex;
-      flex-direction: column;
-      overflow: hidden;
+      width: 200px; flex-shrink: 0; border-left: 1px solid var(--border);
+      background: var(--bg-surface); display: flex; flex-direction: column; overflow: hidden;
     }
-
     .sidebar-header {
-      padding: 14px 16px 10px;
-      border-bottom: 1px solid var(--border);
-      font-size: 10px;
-      color: var(--text-secondary);
-      text-transform: uppercase;
-      letter-spacing: 1.5px;
+      padding: 14px 16px 10px; border-bottom: 1px solid var(--border);
+      font-size: 10px; color: var(--text-secondary); text-transform: uppercase; letter-spacing: 1.5px;
     }
-
-    /* List of online users */
-    #user-list {
-      flex: 1;
-      overflow-y: auto;
-      padding: 8px 0;
-      list-style: none;
-    }
-
-    .user-item {
-      display: flex;
-      align-items: center;
-      gap: 9px;
-      padding: 7px 16px;
-      font-size: 12px;
-      color: var(--text-secondary);
-    }
-    .user-item .online-dot {
-      width: 6px;
-      height: 6px;
-      border-radius: 50%;
-      background: var(--green);
-      box-shadow: 0 0 5px rgba(63,185,80,0.6);
-      flex-shrink: 0;
-    }
-    /* Highlight the current user's entry */
+    #user-list { flex: 1; overflow-y: auto; padding: 8px 0; list-style: none; }
+    .user-item { display: flex; align-items: center; gap: 9px; padding: 7px 16px; font-size: 12px; color: var(--text-secondary); }
+    .user-item .online-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--green); box-shadow: 0 0 5px rgba(63,185,80,0.6); flex-shrink: 0; }
     .user-item.me { color: var(--accent); }
 
-    /* ─────────────────────────────────────────────────────────────
-       PHASE 1 LEARNING PANEL
-       A collapsible panel at the bottom-right showing what's
-       happening under the hood in real time. Makes learning visible.
-    ───────────────────────────────────────────────────────────── */
+    /* Debug panel */
     #debug-panel {
-      position: fixed;
-      bottom: 16px;
-      right: 16px;
-      width: 340px;
-      background: #0d1117;
-      border: 1px solid #30363d;
-      border-radius: 10px;
-      font-size: 11px;
-      z-index: 999;
-      box-shadow: 0 8px 32px rgba(0,0,0,0.6);
-      overflow: hidden;
+      position: fixed; bottom: 16px; right: 16px; width: 380px;
+      background: #0d1117; border: 1px solid #30363d; border-radius: 10px;
+      font-size: 11px; z-index: 999; box-shadow: 0 8px 32px rgba(0,0,0,0.6); overflow: hidden;
     }
-
     .debug-header {
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      padding: 9px 14px;
-      background: #161b22;
-      border-bottom: 1px solid #21262d;
-      cursor: pointer;
+      display: flex; align-items: center; justify-content: space-between;
+      padding: 9px 14px; background: #161b22; border-bottom: 1px solid #21262d; cursor: pointer;
     }
-
-    .debug-title {
-      color: #e3b341;
-      font-weight: 700;
-      font-size: 10px;
-      text-transform: uppercase;
-      letter-spacing: 1.5px;
-    }
-
-    .debug-toggle {
-      color: #7d8590;
-      font-size: 10px;
-    }
-
-    #debug-log {
-      max-height: 220px;
-      overflow-y: auto;
-      padding: 10px 14px;
-      display: flex;
-      flex-direction: column;
-      gap: 3px;
-    }
-
-    .debug-entry {
-      display: flex;
-      gap: 8px;
-      line-height: 1.5;
-    }
-
-    .debug-ts  { color: #3fb950; flex-shrink: 0; }
-    .debug-tag { padding: 0 5px; border-radius: 3px; font-weight: 700; flex-shrink: 0; }
-    .debug-tag.ws   { background: #1f3550; color: #388bfd; }
-    .debug-tag.send { background: #1f3d1f; color: #3fb950; }
-    .debug-tag.recv { background: #3d2020; color: #f85149; }
-    .debug-tag.info { background: #2d2a20; color: #e3b341; }
+    .debug-title  { color: #e3b341; font-weight: 700; font-size: 10px; text-transform: uppercase; letter-spacing: 1.5px; }
+    .debug-toggle { color: #7d8590; font-size: 10px; }
+    #debug-log    { max-height: 240px; overflow-y: auto; padding: 10px 14px; display: flex; flex-direction: column; gap: 3px; }
+    .debug-entry  { display: flex; gap: 8px; line-height: 1.6; }
+    .debug-ts     { color: #3fb950; flex-shrink: 0; }
+    .debug-tag    { padding: 0 5px; border-radius: 3px; font-weight: 700; flex-shrink: 0; }
+    .debug-tag.stomp  { background: #1f3550; color: #388bfd; }
+    .debug-tag.send   { background: #1f3d1f; color: #3fb950; }
+    .debug-tag.recv   { background: #3d2020; color: #f85149; }
+    .debug-tag.http   { background: #2d1f3d; color: #a371f7; }
+    .debug-tag.info   { background: #2d2a20; color: #e3b341; }
     .debug-msg { color: #8b949e; word-break: break-all; }
-
   </style>
 </head>
 <body>
 
-<!-- ═══════════════════════════════════════════════════════════════
-     SCREEN 1 — JOIN SCREEN
-     ═══════════════════════════════════════════════════════════════ -->
+<!-- ═══ JOIN SCREEN ═══ -->
 <div id="join-screen">
   <div class="join-card">
-
-    <!-- Decorative terminal chrome -->
     <div class="window-dots">
       <div class="dot dot-red"></div>
       <div class="dot dot-yellow"></div>
@@ -593,52 +302,24 @@
     </div>
 
     <h1 class="join-title">chatroom_</h1>
-    <p class="join-subtitle">phase 1 · raw websocket</p>
+    <p class="join-subtitle">stomp · sockjs · spring boot · rabbitmq</p>
 
-    <!-- Username field -->
     <label class="field-label" for="username-input">your username</label>
-    <input
-      id="username-input"
-      class="field-input"
-      type="text"
-      placeholder="e.g. alice"
-      maxlength="20"
-      autocomplete="off"
-    />
-
-    <!--
-      WebSocket server URL field.
-      In Phase 1 we have NO backend yet, so we point to a free
-      public echo server: wss://echo.websocket.org
-      It reflects every message you send back to you.
-      In Phase 2 we replace this with our Spring Boot server.
-    -->
-    <label class="field-label" for="server-input">websocket server url</label>
-    <input
-      id="server-input"
-      class="field-input"
-      type="text"
-      value="wss://echo.websocket.org"
-      autocomplete="off"
-    />
+    <input id="username-input" class="field-input" type="text"
+           placeholder="e.g. alice" maxlength="20" autocomplete="off" />
 
     <button id="join-btn" class="btn-primary">connect → join</button>
-
-    <!-- Shown when connection fails -->
     <p id="error-text" class="error-text"></p>
   </div>
 </div>
 
 
-<!-- ═══════════════════════════════════════════════════════════════
-     SCREEN 2 — CHAT SCREEN
-     ═══════════════════════════════════════════════════════════════ -->
+<!-- ═══ CHAT SCREEN ═══ -->
 <div id="chat-screen">
-
-  <!-- Top bar -->
   <header class="topbar">
     <div class="topbar-left">
       <span class="brand"><span>></span> chatroom</span>
+      <span class="phase-badge">stomp</span>
       <div class="status-badge">
         <div id="status-dot" class="status-dot"></div>
         <span id="status-text">disconnected</span>
@@ -650,394 +331,380 @@
     </div>
   </header>
 
-  <!-- Body: messages + sidebar -->
   <div class="chat-body">
-
-    <!-- Message column -->
     <div class="messages-column">
-
-      <!-- Scrollable message list — JS appends children here -->
       <div id="message-list"></div>
-
-      <!-- Message input bar -->
       <div class="input-area">
         <span id="input-prompt" class="input-prompt"></span>
-        <input
-          id="message-input"
-          type="text"
-          placeholder="type a message and press Enter..."
-          maxlength="2000"
-          disabled
-          autocomplete="off"
-        />
+        <input id="message-input" type="text"
+               placeholder="type a message and press Enter..."
+               maxlength="2000" disabled autocomplete="off" />
         <span id="char-count" class="char-count">0 / 2000</span>
         <button id="send-btn" class="btn-send" disabled>send</button>
       </div>
     </div>
 
-    <!-- Online users sidebar -->
     <aside class="sidebar">
-      <div class="sidebar-header">
-        online — <span id="user-count">0</span>
-      </div>
+      <div class="sidebar-header">online — <span id="user-count">0</span></div>
       <ul id="user-list"></ul>
     </aside>
-
   </div>
 </div>
 
 
-<!-- ═══════════════════════════════════════════════════════════════
-     DEBUG / LEARNING PANEL
-     Shows WebSocket events in real time so you can see what's
-     happening at the protocol level as you use the app.
-     ═══════════════════════════════════════════════════════════════ -->
+<!-- ═══ DEBUG PANEL ═══ -->
 <div id="debug-panel">
   <div class="debug-header" id="debug-toggle-btn">
-    <span class="debug-title">⚡ websocket events</span>
+    <span class="debug-title">⚡ stomp frames</span>
     <span class="debug-toggle" id="debug-toggle-label">▼ collapse</span>
   </div>
   <div id="debug-log"></div>
 </div>
 
 
-<!-- ═══════════════════════════════════════════════════════════════
-     JAVASCRIPT — The entire application logic
-     ═══════════════════════════════════════════════════════════════
-
-     ARCHITECTURE IN PHASE 1:
-     Everything lives in this one <script> block.
-     Global variables hold our state (socket, username, users).
-     Functions directly read/write the DOM.
-
-     In Phase 3 (Vue), we'll replace:
-       - Global variables → Vue reactive data (ref, reactive)
-       - Direct DOM manipulation → Vue templates + v-for, v-if
-       - Manual DOM append → Vue's rendering engine
-
-     For now, understanding this manual version makes Vue's value obvious.
--->
 <script>
   // ═══════════════════════════════════════════════════════════════
-  // STATE
-  // These variables represent the application's current condition.
-  // In a framework, these become "reactive state" — the UI updates
-  // automatically when they change. Here, WE must update the UI manually.
+  // STATE — same plain variables as before
+  // In Phase 4 (Vue + Pinia) these become reactive store state.
   // ═══════════════════════════════════════════════════════════════
-
-  /**
-   * socket — The WebSocket connection object.
-   * null = not connected.
-   * Once assigned (new WebSocket(...)), it's a live connection.
-   *
-   * The WebSocket API is defined in the HTML Living Standard (WHATWG).
-   * It's built into every modern browser — no library needed.
-   */
-  let socket = null;
-
-  /**
-   * myUsername — The name this user chose on the join screen.
-   * We use it to decide if an incoming message is "mine" (right-aligned)
-   * or "theirs" (left-aligned).
-   */
-  let myUsername = '';
-
-  /**
-   * onlineUsers — A JavaScript Set of usernames currently in the chat.
-   * We use Set (not Array) because Set prevents duplicates automatically.
-   * When someone joins: onlineUsers.add('alice')
-   * When someone leaves: onlineUsers.delete('alice')
-   */
+  let stompClient = null;   // replaces: let socket = null
+  let myUsername  = '';
   let onlineUsers = new Set();
-
-  /**
-   * debugCollapsed — Whether the debug panel is collapsed.
-   */
   let debugCollapsed = false;
 
-
-  // ═══════════════════════════════════════════════════════════════
-  // DOM REFERENCES
-  // We grab all the DOM elements we'll need upfront.
-  // In Vue, we use `ref` or just write template variables.
-  // Here, document.getElementById() is the manual equivalent.
-  // ═══════════════════════════════════════════════════════════════
-
-  const joinScreen        = document.getElementById('join-screen');
-  const chatScreen        = document.getElementById('chat-screen');
-  const usernameInput     = document.getElementById('username-input');
-  const serverInput       = document.getElementById('server-input');
-  const joinBtn           = document.getElementById('join-btn');
-  const errorText         = document.getElementById('error-text');
-
-  const statusDot         = document.getElementById('status-dot');
-  const statusText        = document.getElementById('status-text');
-  const currentUserLabel  = document.getElementById('current-user-label');
-  const leaveBtn          = document.getElementById('leave-btn');
-
-  const messageList       = document.getElementById('message-list');
-  const messageInput      = document.getElementById('message-input');
-  const charCount         = document.getElementById('char-count');
-  const sendBtn           = document.getElementById('send-btn');
-  const inputPrompt       = document.getElementById('input-prompt');
-
-  const userList          = document.getElementById('user-list');
-  const userCount         = document.getElementById('user-count');
-
-  const debugLog          = document.getElementById('debug-log');
-  const debugToggleBtn    = document.getElementById('debug-toggle-btn');
-  const debugToggleLabel  = document.getElementById('debug-toggle-label');
+  // Spring Boot server base URL
+  // Note: no /ws/websocket suffix anymore — SockJS handles transport
+  const SERVER_URL = 'http://localhost:8080/ws';
 
 
   // ═══════════════════════════════════════════════════════════════
-  // WEBSOCKET FUNCTIONS
-  // This is the core learning content for Phase 1.
+  // DOM REFERENCES — identical to before
   // ═══════════════════════════════════════════════════════════════
+  const joinScreen       = document.getElementById('join-screen');
+  const chatScreen       = document.getElementById('chat-screen');
+  const usernameInput    = document.getElementById('username-input');
+  const joinBtn          = document.getElementById('join-btn');
+  const errorText        = document.getElementById('error-text');
+  const statusDot        = document.getElementById('status-dot');
+  const statusText_el    = document.getElementById('status-text');
+  const currentUserLabel = document.getElementById('current-user-label');
+  const leaveBtn         = document.getElementById('leave-btn');
+  const messageList      = document.getElementById('message-list');
+  const messageInput     = document.getElementById('message-input');
+  const charCount        = document.getElementById('char-count');
+  const sendBtn          = document.getElementById('send-btn');
+  const inputPrompt      = document.getElementById('input-prompt');
+  const userList         = document.getElementById('user-list');
+  const userCount        = document.getElementById('user-count');
+  const debugLog         = document.getElementById('debug-log');
+  const debugToggleBtn   = document.getElementById('debug-toggle-btn');
+  const debugToggleLabel = document.getElementById('debug-toggle-label');
 
-  /**
-   * connect() — Creates a WebSocket connection and attaches event handlers.
-   *
-   * The browser's WebSocket API (RFC 6455) works like this:
-   *
-   *   1. new WebSocket(url)
-   *      - Initiates a TCP connection to the server
-   *      - Sends an HTTP Upgrade request:
-   *          GET /chat HTTP/1.1
-   *          Upgrade: websocket
-   *          Connection: Upgrade
-   *          Sec-WebSocket-Key: <random base64>
-   *      - Server responds with 101 Switching Protocols
-   *      - Connection is now a full-duplex WebSocket
-   *
-   *   2. socket.onopen    — fires when connection is established
-   *   3. socket.onmessage — fires when a message arrives from server
-   *   4. socket.onerror   — fires on error
-   *   5. socket.onclose   — fires when connection closes
-   *
-   *   To send: socket.send("some text or binary data")
-   *   To close: socket.close()
-   *
-   * The url must start with ws:// (unencrypted) or wss:// (TLS encrypted).
-   * wss:// is the WebSocket equivalent of https://.
-   */
-  function connect(url, username) {
-    logDebug('ws', `connecting to ${url}`);
-    setStatus('connecting');
 
-    /**
-     * new WebSocket(url)
-     * This is it — one line to create a WebSocket connection.
-     * The browser does the TCP handshake and HTTP upgrade automatically.
-     */
-    socket = new WebSocket(url);
+  // ═══════════════════════════════════════════════════════════════
+  // HISTORY LOADER — same as Phase 2
+  // Uses fetch() to call GET /api/messages before connecting STOMP.
+  // ═══════════════════════════════════════════════════════════════
+  async function loadHistory() {
+    try {
+      logDebug('http', 'GET /api/messages');
+      const response = await fetch('http://localhost:8080/api/messages');
+      if (!response.ok) throw new Error('HTTP ' + response.status);
+      const messages = await response.json();
+      logDebug('http', 'received ' + messages.length + ' messages');
 
-    // ── socket.onopen ────────────────────────────────────────────
-    /**
-     * Fires when the WebSocket handshake completes successfully.
-     * At this point the connection is open and ready to send/receive.
-     *
-     * We:
-     *   - Update the UI to show "connected"
-     *   - Add ourselves to the online users list
-     *   - Broadcast a JOIN message so other users know we arrived
-     *   - Enable the message input
-     */
-    socket.onopen = function(event) {
-      logDebug('ws', 'connection opened (HTTP 101 Switching Protocols)');
-      setStatus('connected');
-
-      // Show the chat screen, hide the join screen
-      joinScreen.style.display = 'none';
-      chatScreen.style.display = 'flex';
-
-      // Update UI with current user info
-      currentUserLabel.textContent = username;
-      inputPrompt.textContent = username + ' >';
-
-      // Add ourselves to the users list
-      onlineUsers.add(username);
-      renderUserList();
-
-      // Enable message input now that we're connected
-      messageInput.disabled = false;
-      sendBtn.disabled = false;
-      messageInput.focus();
-
-      // Broadcast JOIN event to all other users
-      // We format our own simple message protocol as JSON.
-      // { type, sender, content }
-      // In Phase 2, this structure matches ChatMessage.java exactly.
-      broadcastEvent('JOIN', username + ' joined the chat');
-
-      // Show a local system message (not sent to others — for our own screen)
-      appendSystemMessage('you joined · ' + new Date().toLocaleTimeString(), 'join');
-    };
-
-    // ── socket.onmessage ─────────────────────────────────────────
-    /**
-     * Fires every time a message arrives from the server.
-     *
-     * event.data — The message payload.
-     *   In Phase 1 with the echo server: whatever we sent comes back.
-     *   In Phase 2 with Spring Boot: JSON strings from ChatMessage objects.
-     *
-     * We parse the JSON and dispatch based on the 'type' field.
-     */
-    socket.onmessage = function(event) {
-      logDebug('recv', event.data);
-
-      let message;
-      try {
-        /**
-         * JSON.parse() — Converts the JSON string back to a JavaScript object.
-         * If parsing fails (malformed JSON), we catch the error and ignore it.
-         */
-        message = JSON.parse(event.data);
-      } catch (e) {
-        // Not JSON — could be a plain text message from the echo server
-        // or an unexpected format. We log it but don't crash.
-        logDebug('info', 'non-JSON message received, ignoring');
-        return;
+      if (messages.length > 0) {
+        appendHistoryDivider('history (' + messages.length + ' messages)');
+        messages.forEach(function(msg) {
+          if (msg.type === 'CHAT') {
+            appendChatMessage(msg.sender, msg.content, msg.sentAt, msg.sender === myUsername);
+          } else {
+            appendSystemMessage(msg.content, msg.type === 'JOIN' ? 'join' : 'leave');
+          }
+        });
+        appendHistoryDivider('live ↓');
       }
-
-      // Dispatch to the right handler based on message type
-      if (message.type === 'CHAT') {
-        handleChatMessage(message);
-      } else if (message.type === 'JOIN') {
-        handleJoinMessage(message);
-      } else if (message.type === 'LEAVE') {
-        handleLeaveMessage(message);
-      }
-    };
-
-    // ── socket.onerror ───────────────────────────────────────────
-    /**
-     * Fires when a WebSocket error occurs.
-     *
-     * NOTE: The WebSocket spec intentionally gives very little error detail
-     * in the onerror event (for security — prevents probing internal networks).
-     * The actual reason is usually in the onclose event that follows.
-     */
-    socket.onerror = function(event) {
-      logDebug('ws', 'error occurred (check onclose for details)');
-      showError('Connection error. Is the server running?');
-    };
-
-    // ── socket.onclose ───────────────────────────────────────────
-    /**
-     * Fires when the WebSocket connection closes.
-     *
-     * event.code   — Close code (1000 = normal, 1006 = abnormal/network error)
-     * event.reason — Human-readable reason string (often empty)
-     * event.wasClean — True if the connection was closed cleanly (not dropped)
-     *
-     * Common close codes (RFC 6455 Section 7.4):
-     *   1000 — Normal closure
-     *   1001 — Going away (server shutting down, page navigated away)
-     *   1006 — Abnormal closure (no close frame, network drop)
-     *   1011 — Server error
-     */
-    socket.onclose = function(event) {
-      logDebug('ws', `connection closed — code: ${event.code}, clean: ${event.wasClean}`);
-      setStatus('disconnected');
-      messageInput.disabled = true;
-      sendBtn.disabled = true;
-      socket = null;
-
-      // If we didn't manually close it (leave button), show disconnected state
-      if (chatScreen.style.display === 'flex') {
-        appendSystemMessage('connection closed (code ' + event.code + ')', 'leave');
-      }
-    };
+    } catch (e) {
+      logDebug('info', 'history unavailable: ' + e.message);
+    }
   }
 
-  /**
-   * sendMessage() — Sends data over the WebSocket connection.
-   *
-   * socket.send(data) — Sends a message to the server.
-   *   data can be: string, ArrayBuffer, Blob, or ArrayBufferView.
-   *   We always use JSON strings (serialized JavaScript objects).
-   *
-   * Our message format:
-   *   { type: 'CHAT'|'JOIN'|'LEAVE', sender: string, content: string }
-   *
-   * This format is intentional — it exactly matches ChatMessage.java
-   * in Phase 2 so no changes needed when we add the backend.
-   */
+
+  // ═══════════════════════════════════════════════════════════════
+  // STOMP CONNECTION
+  //
+  // THIS IS THE KEY CHANGE FROM PHASE 1 AND 2.
+  //
+  // Before: new WebSocket(url)
+  // After:  new StompJs.Client({ ... })
+  //
+  // The STOMP client wraps SockJS which wraps WebSocket.
+  // Three layers:
+  //
+  //   Your code
+  //      ↕  STOMP frames (CONNECT, SEND, SUBSCRIBE, MESSAGE)
+  //   @stomp/stompjs
+  //      ↕  SockJS protocol (transport negotiation)
+  //   SockJS
+  //      ↕  WebSocket (or HTTP fallback)
+  //   Spring Boot
+  // ═══════════════════════════════════════════════════════════════
+
+  async function connect(username) {
+    setStatus('connecting');
+
+    // Load history first so it appears before live messages
+    await loadHistory();
+
+    /**
+     * new StompJs.Client({...})
+     *
+     * Creates a STOMP client. This does NOT connect yet —
+     * it just configures the client. Connection happens
+     * when we call stompClient.activate() below.
+     *
+     * Note: the CDN version of stomp.js uses the global
+     * variable Stomp (not StompJs). We use Stomp.client() syntax.
+     */
+
+    /**
+     * SockJS(SERVER_URL)
+     *
+     * Creates a SockJS connection to http://localhost:8080/ws.
+     * SockJS visits /ws/info first to check what transports
+     * are available, then connects via the best one.
+     *
+     * On a good network: uses native WebSocket → /ws/websocket
+     * On restricted network: falls back to HTTP → /ws/xhr_streaming
+     *
+     * This is completely transparent to our code — we just use
+     * stompClient.publish() and it works either way.
+     */
+    var socket = new SockJS(SERVER_URL);
+
+    /**
+     * Stomp.over(socket)
+     *
+     * Wraps the SockJS socket with STOMP protocol.
+     * Now all communication goes through STOMP frames:
+     *
+     *   CONNECT frame:
+     *     CONNECT
+     *     accept-version:1.1,1.2
+     *     heart-beat:4000,4000
+     *
+     *   SEND frame (when we publish a message):
+     *     SEND
+     *     destination:/app/chat.send
+     *     content-type:application/json
+     *
+     *     {"content":"Hello","sender":"alice","type":"CHAT"}
+     *
+     *   SUBSCRIBE frame (when we subscribe to a topic):
+     *     SUBSCRIBE
+     *     id:sub-0
+     *     destination:/topic/chatroom
+     *
+     * Spring's @MessageMapping reads the destination header
+     * from the SEND frame to route the message correctly.
+     * This is what was missing with raw WebSocket.
+     */
+    stompClient = Stomp.over(socket);
+
+    /**
+     * Disable STOMP's built-in console logging.
+     * By default it prints every frame to the browser console —
+     * very noisy. We handle logging ourselves in the debug panel.
+     */
+    stompClient.debug = function(str) {
+      // Only log connection-related messages, skip heartbeat noise
+      if (str.includes('CONNECT') || str.includes('CONNECTED') ||
+          str.includes('ERROR') || str.includes('DISCONNECT')) {
+        logDebug('stomp', str.trim());
+      }
+    };
+
+    /**
+     * stompClient.connect(headers, onConnected, onError)
+     *
+     * Initiates the full connection sequence:
+     *   1. SockJS opens transport (WebSocket or HTTP)
+     *   2. STOMP sends CONNECT frame
+     *   3. Spring validates and sends CONNECTED frame
+     *   4. onConnected callback fires — safe to subscribe + publish
+     *
+     * headers: {} — we send no special headers for now.
+     * In Phase 4 (Security) we add: { Authorization: 'Bearer ' + token }
+     */
+    stompClient.connect(
+      {},
+
+      // ── onConnected callback ────────────────────────────────
+      /**
+       * Fires when Spring sends back the STOMP CONNECTED frame.
+       * At this point the connection is fully established.
+       * Safe to subscribe and publish.
+       */
+      function onConnected(frame) {
+        logDebug('stomp', 'CONNECTED — ' + frame);
+        setStatus('connected');
+
+        // Show chat screen
+        joinScreen.style.display = 'none';
+        chatScreen.style.display = 'flex';
+        currentUserLabel.textContent = username;
+        inputPrompt.textContent = username + ' >';
+
+        onlineUsers.add(username);
+        renderUserList();
+        messageInput.disabled = false;
+        sendBtn.disabled = false;
+        messageInput.focus();
+
+        /**
+         * SUBSCRIBE to /topic/chatroom
+         *
+         * This sends a STOMP SUBSCRIBE frame to Spring Boot:
+         *   SUBSCRIBE
+         *   id:sub-0
+         *   destination:/topic/chatroom
+         *
+         * Spring registers us as a subscriber.
+         * Every time ChatMessageListener (our RabbitMQ consumer)
+         * calls messagingTemplate.convertAndSend("/topic/chatroom", msg),
+         * Spring delivers it here.
+         *
+         * The callback fires for every message we receive.
+         * frame.body is the JSON string of the ChatMessage.
+         */
+        stompClient.subscribe('/topic/chatroom', function(frame) {
+          logDebug('recv', frame.body);
+          var message = JSON.parse(frame.body);
+          handleIncomingMessage(message);
+        });
+
+        /**
+         * ANNOUNCE JOIN via /app/chat.addUser
+         *
+         * This sends a STOMP SEND frame:
+         *   SEND
+         *   destination:/app/chat.addUser
+         *   content-type:application/json
+         *
+         *   {"sender":"alice","type":"JOIN","content":""}
+         *
+         * Spring routes this to ChatController.addUser()
+         * because of @MessageMapping("/chat.addUser").
+         * (Spring strips the /app prefix before matching.)
+         *
+         * ChatController.addUser() then:
+         *   1. Stores username in session (for disconnect detection)
+         *   2. Saves JOIN to H2
+         *   3. Publishes to RabbitMQ
+         *   4. ChatMessageListener broadcasts to /topic/chatroom
+         *   5. All clients see "alice joined the chat"
+         */
+        stompClient.send(
+          '/app/chat.addUser',
+          {},
+          JSON.stringify({ sender: username, type: 'JOIN', content: '' })
+        );
+
+        appendSystemMessage('you joined · ' + new Date().toLocaleTimeString(), 'join');
+      },
+
+      // ── onError callback ────────────────────────────────────
+      /**
+       * Fires if the STOMP connection fails.
+       * Common causes:
+       *   - Spring Boot not running
+       *   - Wrong URL
+       *   - STOMP connection rejected by server
+       */
+      function onError(error) {
+        logDebug('stomp', 'ERROR — ' + error);
+        setStatus('error');
+        showError('Cannot connect. Is Spring Boot running on port 8080?');
+        joinBtn.disabled = false;
+        joinBtn.textContent = 'connect → join';
+      }
+    );
+  }
+
+
+  // ═══════════════════════════════════════════════════════════════
+  // SEND MESSAGE
+  //
+  // Before: socket.send(JSON.stringify({...}))
+  // After:  stompClient.send('/app/chat.send', {}, JSON.stringify({...}))
+  //
+  // The difference:
+  //   socket.send() — sends raw bytes, no routing info
+  //   stompClient.send() — sends a STOMP SEND frame WITH destination header
+  //
+  // Spring reads the destination header (/app/chat.send),
+  // strips /app, matches @MessageMapping("/chat.send"),
+  // and routes to ChatController.sendMessage().
+  // ═══════════════════════════════════════════════════════════════
+
   function sendMessage(content) {
-    if (!socket || socket.readyState !== WebSocket.OPEN) {
-      logDebug('info', 'cannot send — socket not open');
+    if (!stompClient || !stompClient.connected) {
+      logDebug('info', 'cannot send — not connected');
       return;
     }
 
     /**
-     * socket.readyState — The current state of the connection:
-     *   WebSocket.CONNECTING (0) — The connection is being established
-     *   WebSocket.OPEN      (1) — Connection is open and ready
-     *   WebSocket.CLOSING   (2) — Connection is being closed
-     *   WebSocket.CLOSED    (3) — Connection is closed
+     * stompClient.send(destination, headers, body)
      *
-     * We check OPEN before sending to avoid errors.
+     * destination: '/app/chat.send'
+     *   The /app prefix routes to @MessageMapping in Spring.
+     *   Without this prefix, the message goes directly to the broker
+     *   (bypassing your controller — no validation, no DB save).
+     *
+     * headers: {}
+     *   No extra headers needed for basic chat.
+     *   In Phase 4 (Security) we add auth headers here.
+     *
+     * body: JSON string of the message
+     *   Spring's @Payload ChatMessage deserializes this automatically.
+     *   We only need content and sender — Spring sets type and sentAt.
      */
-
-    const message = {
-      type: 'CHAT',
-      sender: myUsername,
+    var payload = JSON.stringify({
       content: content,
-      // sentAt is added here in Phase 1 since there's no server to add it.
-      // In Phase 2, the server sets this — we remove it from the client.
-      sentAt: new Date().toISOString()
-    };
+      sender: myUsername,
+      type: 'CHAT'
+    });
 
-    const json = JSON.stringify(message);
-    logDebug('send', json);
-
-    /**
-     * socket.send(json) — Transmits the message to the server.
-     * With the echo server, it'll come back in onmessage immediately.
-     * With Spring Boot (Phase 2), it goes to @MessageMapping,
-     * gets processed, and comes back via the /topic/chatroom subscription.
-     */
-    socket.send(json);
+    logDebug('send', '/app/chat.send → ' + payload);
+    stompClient.send('/app/chat.send', {}, payload);
   }
 
-  /**
-   * broadcastEvent() — Sends a JOIN or LEAVE system message.
-   *
-   * These are structural messages, not user-typed content.
-   * They tell other users that someone joined or left.
-   */
-  function broadcastEvent(type, content) {
-    if (!socket || socket.readyState !== WebSocket.OPEN) return;
-    const message = {
-      type: type,
-      sender: myUsername,
-      content: content,
-      sentAt: new Date().toISOString()
-    };
-    socket.send(JSON.stringify(message));
-  }
 
-  /**
-   * disconnect() — Closes the WebSocket connection.
-   *
-   * Before closing, we send a LEAVE message so other users know.
-   * Then socket.close() initiates the closing handshake.
-   *
-   * socket.close(code, reason):
-   *   code   — a close code (1000 = normal closure)
-   *   reason — a short string (max 123 bytes)
-   */
+  // ═══════════════════════════════════════════════════════════════
+  // DISCONNECT
+  // ═══════════════════════════════════════════════════════════════
+
   function disconnect() {
-    if (socket) {
-      broadcastEvent('LEAVE', myUsername + ' left the chat');
-      socket.close(1000, 'User left');
+    if (stompClient) {
+      /**
+       * stompClient.disconnect()
+       *
+       * Sends a STOMP DISCONNECT frame gracefully.
+       * Spring receives it, fires SessionDisconnectEvent,
+       * WebSocketEventListener broadcasts the LEAVE message.
+       *
+       * This is cleaner than just closing the connection —
+       * the server knows immediately you left rather than
+       * waiting for heartbeat timeout.
+       */
+      stompClient.disconnect(function() {
+        logDebug('stomp', 'DISCONNECTED');
+      });
+      stompClient = null;
     }
-    // Return to join screen
+
     chatScreen.style.display = 'none';
     joinScreen.style.display = 'flex';
-
-    // Reset state
     onlineUsers.clear();
     messageList.innerHTML = '';
     userList.innerHTML = '';
@@ -1050,333 +717,167 @@
 
   // ═══════════════════════════════════════════════════════════════
   // MESSAGE HANDLERS
-  // Each handler processes a specific message type and updates the DOM.
-  // In Phase 3 (Vue), these become reactive data updates —
-  // instead of appendMessage(), we push to messages array and Vue renders.
+  // Same logic as before — just receives the parsed message object
+  // and updates the DOM accordingly.
   // ═══════════════════════════════════════════════════════════════
 
-  function handleChatMessage(message) {
-    const isMine = (message.sender === myUsername);
-    appendChatMessage(message.sender, message.content, message.sentAt, isMine);
-  }
-
-  function handleJoinMessage(message) {
-    // Don't show our own join (we already showed "you joined" locally)
-    if (message.sender === myUsername) return;
-    onlineUsers.add(message.sender);
-    renderUserList();
-    appendSystemMessage(message.content, 'join');
-  }
-
-  function handleLeaveMessage(message) {
-    onlineUsers.delete(message.sender);
-    renderUserList();
-    appendSystemMessage(message.content, 'leave');
+  function handleIncomingMessage(message) {
+    if (message.type === 'CHAT') {
+      var isMine = (message.sender === myUsername);
+      appendChatMessage(message.sender, message.content, message.sentAt, isMine);
+    } else if (message.type === 'JOIN') {
+      if (message.sender !== myUsername) {
+        onlineUsers.add(message.sender);
+        renderUserList();
+        appendSystemMessage(message.content, 'join');
+      }
+    } else if (message.type === 'LEAVE') {
+      onlineUsers.delete(message.sender);
+      renderUserList();
+      appendSystemMessage(message.content, 'leave');
+    }
   }
 
 
   // ═══════════════════════════════════════════════════════════════
-  // DOM MANIPULATION
-  // These functions directly create and insert HTML elements.
-  // This is the "before Vue" way of rendering dynamic content.
-  // In Vue, templates + v-for replace all of this.
+  // DOM HELPERS — identical to Phase 1 and 2
   // ═══════════════════════════════════════════════════════════════
 
-  /**
-   * appendChatMessage() — Creates and inserts a chat message bubble.
-   *
-   * We use document.createElement() to build the HTML structure:
-   *   .message > .avatar + .message-body > .message-meta + .bubble
-   *
-   * Then appendChild() inserts it into the DOM.
-   * Finally, scrollToBottom() scrolls the list down.
-   *
-   * Contrast this with Vue Phase 3, where we just push to messages[]
-   * and the template re-renders automatically.
-   */
   function appendChatMessage(sender, content, sentAt, isMine) {
-    const wrapper = document.createElement('div');
+    var wrapper = document.createElement('div');
     wrapper.className = 'message ' + (isMine ? 'mine' : 'theirs');
 
-    // Avatar — first letter of username, colored deterministically
-    const avatar = document.createElement('div');
+    var avatar = document.createElement('div');
     avatar.className = 'avatar';
     avatar.style.background = getAvatarColor(sender);
-    avatar.style.color = '#ffffff';
+    avatar.style.color = '#fff';
     avatar.textContent = sender.charAt(0).toUpperCase();
 
-    // Message body (holds meta + bubble)
-    const body = document.createElement('div');
+    var body = document.createElement('div');
     body.className = 'message-body';
 
-    // Meta row: sender name + timestamp
-    const meta = document.createElement('div');
+    var meta = document.createElement('div');
     meta.className = 'message-meta';
 
-    const senderEl = document.createElement('span');
+    var senderEl = document.createElement('span');
     senderEl.className = 'message-sender';
     senderEl.textContent = isMine ? 'you' : sender;
 
-    const timeEl = document.createElement('span');
+    var timeEl = document.createElement('span');
     timeEl.className = 'message-time';
     timeEl.textContent = formatTime(sentAt);
 
     meta.appendChild(senderEl);
     meta.appendChild(timeEl);
 
-    // Text bubble
-    const bubble = document.createElement('div');
+    var bubble = document.createElement('div');
     bubble.className = 'bubble';
-    /**
-     * textContent vs innerHTML:
-     * We use textContent (not innerHTML) for user-supplied content.
-     * innerHTML would interpret HTML tags — a security risk (XSS).
-     * textContent treats everything as plain text — safe.
-     *
-     * OWASP XSS Prevention Rule #1: Never insert user data with innerHTML.
-     */
-    bubble.textContent = content;
+    bubble.textContent = content; // textContent not innerHTML — prevents XSS
 
     body.appendChild(meta);
     body.appendChild(bubble);
     wrapper.appendChild(avatar);
     wrapper.appendChild(body);
-
     messageList.appendChild(wrapper);
     scrollToBottom();
   }
 
-  /**
-   * appendSystemMessage() — Creates a centered system event pill.
-   *  "alice joined the chat" / "bob left the chat"
-   */
   function appendSystemMessage(text, type) {
-    const wrapper = document.createElement('div');
+    var wrapper = document.createElement('div');
     wrapper.className = 'system-event';
-
-    const pill = document.createElement('span');
+    var pill = document.createElement('span');
     pill.className = 'system-event-text ' + (type || '');
     pill.textContent = text;
-
     wrapper.appendChild(pill);
     messageList.appendChild(wrapper);
     scrollToBottom();
   }
 
-  /**
-   * renderUserList() — Re-renders the entire online users list.
-   *
-   * We clear the list and rebuild from scratch every time the Set changes.
-   * This is the simplest approach (and fine for small lists).
-   *
-   * Vue's v-for directive does something smarter — it diffs the previous
-   * and new lists and only updates the DOM nodes that changed.
-   */
+  function appendHistoryDivider(label) {
+    var d = document.createElement('div');
+    d.className = 'history-divider';
+    var s = document.createElement('span');
+    s.textContent = label;
+    d.appendChild(s);
+    messageList.appendChild(d);
+  }
+
   function renderUserList() {
-    userList.innerHTML = ''; // Clear
+    userList.innerHTML = '';
     userCount.textContent = onlineUsers.size;
-
-    onlineUsers.forEach(function(username) {
-      const li = document.createElement('li');
-      li.className = 'user-item' + (username === myUsername ? ' me' : '');
-
-      const dot = document.createElement('div');
+    onlineUsers.forEach(function(u) {
+      var li = document.createElement('li');
+      li.className = 'user-item' + (u === myUsername ? ' me' : '');
+      var dot = document.createElement('div');
       dot.className = 'online-dot';
-
-      const name = document.createElement('span');
-      name.textContent = username + (username === myUsername ? ' (you)' : '');
-
+      var name = document.createElement('span');
+      name.textContent = u + (u === myUsername ? ' (you)' : '');
       li.appendChild(dot);
       li.appendChild(name);
       userList.appendChild(li);
     });
   }
 
-  /**
-   * scrollToBottom() — Scrolls the message list to show the newest message.
-   *
-   * scrollTop = scrollHeight sets scroll position to the very bottom.
-   * We use 'smooth' behavior for a polished feel.
-   *
-   * In Vue (Phase 3), we'll do this inside a nextTick() callback
-   * to ensure the DOM is updated before we scroll.
-   */
   function scrollToBottom() {
     messageList.scrollTo({ top: messageList.scrollHeight, behavior: 'smooth' });
   }
 
-
-  // ═══════════════════════════════════════════════════════════════
-  // UI HELPERS
-  // Small functions to update specific UI states.
-  // ═══════════════════════════════════════════════════════════════
-
-  /**
-   * setStatus() — Updates the connection status indicator.
-   * Sets both the dot color (via CSS class) and the text label.
-   */
-  function setStatus(status) {
-    statusDot.className = 'status-dot ' + status;
-    statusText.textContent = status;
+  function setStatus(s) {
+    statusDot.className = 'status-dot ' + s;
+    statusText_el.textContent = s;
   }
 
-  function showError(message) {
-    errorText.style.display = 'block';
-    errorText.textContent = message;
+  function showError(msg) { errorText.style.display = 'block'; errorText.textContent = msg; }
+  function hideError()    { errorText.style.display = 'none';  errorText.textContent = ''; }
+
+  function formatTime(iso) {
+    if (!iso) return '';
+    try { return new Date(iso).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }); }
+    catch(e) { return ''; }
   }
 
-  function hideError() {
-    errorText.style.display = 'none';
-    errorText.textContent = '';
-  }
-
-  /**
-   * formatTime() — Converts an ISO timestamp to a readable time.
-   * "2024-01-15T14:32:00.000Z" → "2:32 PM"
-   *
-   * In Phase 4+, we use dayjs library for this.
-   * Here, native Date methods are enough.
-   */
-  function formatTime(isoString) {
-    if (!isoString) return '';
-    try {
-      return new Date(isoString).toLocaleTimeString([], {
-        hour: '2-digit',
-        minute: '2-digit'
-      });
-    } catch (e) {
-      return '';
-    }
-  }
-
-  /**
-   * getAvatarColor() — Returns a consistent background color for a username.
-   *
-   * We pick a color based on the character code of the first letter,
-   * so the same username always gets the same color.
-   */
   function getAvatarColor(username) {
-    const colors = [
-      '#1f4068', '#1b4332', '#3d1a78', '#5c2018', '#1a3a4a',
-      '#2d4a1e', '#4a1a2e', '#1a3d3d'
-    ];
-    const index = (username.charCodeAt(0) || 0) % colors.length;
-    return colors[index];
+    var colors = ['#1f4068','#1b4332','#3d1a78','#5c2018','#1a3a4a','#2d4a1e','#4a1a2e','#1a3d3d'];
+    return colors[(username.charCodeAt(0) || 0) % colors.length];
   }
 
-
-  // ═══════════════════════════════════════════════════════════════
-  // DEBUG PANEL
-  // Logs WebSocket events so you can see what's happening.
-  // ═══════════════════════════════════════════════════════════════
-
-  /**
-   * logDebug() — Appends an entry to the debug panel.
-   *
-   * @param {string} tag  — 'ws', 'send', 'recv', or 'info'
-   * @param {string} msg  — The message to display
-   */
   function logDebug(tag, msg) {
-    const entry = document.createElement('div');
+    var entry = document.createElement('div');
     entry.className = 'debug-entry';
-
-    const ts = document.createElement('span');
+    var ts = document.createElement('span');
     ts.className = 'debug-ts';
-    ts.textContent = new Date().toLocaleTimeString([], {
-      hour: '2-digit', minute: '2-digit', second: '2-digit'
-    });
-
-    const tagEl = document.createElement('span');
+    ts.textContent = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+    var tagEl = document.createElement('span');
     tagEl.className = 'debug-tag ' + tag;
     tagEl.textContent = tag.toUpperCase();
-
-    const msgEl = document.createElement('span');
+    var msgEl = document.createElement('span');
     msgEl.className = 'debug-msg';
-    // Truncate very long messages for readability
-    msgEl.textContent = msg.length > 120 ? msg.substring(0, 120) + '...' : msg;
-
-    entry.appendChild(ts);
-    entry.appendChild(tagEl);
-    entry.appendChild(msgEl);
+    msgEl.textContent = String(msg).length > 160 ? String(msg).substring(0, 160) + '...' : String(msg);
+    entry.appendChild(ts); entry.appendChild(tagEl); entry.appendChild(msgEl);
     debugLog.appendChild(entry);
-
-    // Auto-scroll the debug log
     debugLog.scrollTop = debugLog.scrollHeight;
   }
 
 
   // ═══════════════════════════════════════════════════════════════
-  // EVENT LISTENERS
-  // Wire up user interactions to our functions.
-  // In Vue, @click="handleSend" in the template replaces this.
-  // Here, we use addEventListener() manually.
+  // EVENT LISTENERS — same as before
   // ═══════════════════════════════════════════════════════════════
 
-  /**
-   * Join button click — validate inputs and connect.
-   */
   joinBtn.addEventListener('click', function() {
-    const username = usernameInput.value.trim();
-    const serverUrl = serverInput.value.trim();
-
-    // Validation: username required
-    if (!username) {
-      showError('Please enter a username.');
-      return;
-    }
-
-    // Validation: server URL required
-    if (!serverUrl) {
-      showError('Please enter a WebSocket server URL.');
-      return;
-    }
-
-    // Validation: must be a WebSocket URL (ws:// or wss://)
-    if (!serverUrl.startsWith('ws://') && !serverUrl.startsWith('wss://')) {
-      showError('URL must start with ws:// or wss://');
-      return;
-    }
-
+    var username = usernameInput.value.trim();
+    if (!username) { showError('Please enter a username.'); return; }
     hideError();
     myUsername = username;
-
-    /**
-     * Disable button while connecting to prevent double-clicks.
-     * Re-enabled only if connection fails.
-     */
     joinBtn.disabled = true;
     joinBtn.textContent = 'connecting...';
-
-    connect(serverUrl, username);
-
-    // Re-enable button after a timeout in case of connection failure
-    setTimeout(function() {
-      joinBtn.disabled = false;
-      joinBtn.textContent = 'connect → join';
-    }, 5000);
+    connect(username);
   });
 
-  /**
-   * Enter key on username/server input → trigger join button.
-   * Natural keyboard behavior: user presses Enter instead of clicking.
-   */
-  usernameInput.addEventListener('keyup', function(e) {
-    if (e.key === 'Enter') joinBtn.click();
-  });
-  serverInput.addEventListener('keyup', function(e) {
-    if (e.key === 'Enter') joinBtn.click();
-  });
-
-  /**
-   * Leave button — disconnect and return to join screen.
-   */
+  usernameInput.addEventListener('keyup', function(e) { if (e.key === 'Enter') joinBtn.click(); });
   leaveBtn.addEventListener('click', disconnect);
 
-  /**
-   * Send button click — send the message.
-   */
   sendBtn.addEventListener('click', function() {
-    const content = messageInput.value.trim();
+    var content = messageInput.value.trim();
     if (!content) return;
     sendMessage(content);
     messageInput.value = '';
@@ -1384,51 +885,22 @@
     messageInput.focus();
   });
 
-  /**
-   * Enter key on message input → send.
-   * Standard chat UX (as per Nielsen's Heuristic #4: Consistency with conventions).
-   */
-  messageInput.addEventListener('keyup', function(e) {
-    if (e.key === 'Enter') {
-      sendBtn.click();
-    }
-  });
+  messageInput.addEventListener('keyup', function(e) { if (e.key === 'Enter') sendBtn.click(); });
+  messageInput.addEventListener('input', function()  { charCount.textContent = this.value.length + ' / 2000'; });
 
-  /**
-   * Input event on message field → update character count.
-   * The 'input' event fires on every keystroke (unlike 'change' which fires on blur).
-   */
-  messageInput.addEventListener('input', function() {
-    charCount.textContent = this.value.length + ' / 2000';
-  });
-
-  /**
-   * Debug panel toggle — collapse/expand.
-   */
   debugToggleBtn.addEventListener('click', function() {
     debugCollapsed = !debugCollapsed;
     debugLog.style.display = debugCollapsed ? 'none' : 'flex';
     debugToggleLabel.textContent = debugCollapsed ? '▶ expand' : '▼ collapse';
   });
 
-  /**
-   * beforeunload — Clean up when the user closes/navigates away.
-   *
-   * The 'beforeunload' event fires when the page is about to be unloaded.
-   * We close the WebSocket gracefully so the server knows we left.
-   * Without this, the server would detect a dead connection via heartbeat timeout.
-   */
   window.addEventListener('beforeunload', function() {
-    if (socket) {
-      broadcastEvent('LEAVE', myUsername + ' left the chat');
-      socket.close(1000, 'Page unloaded');
-    }
+    if (stompClient) stompClient.disconnect();
   });
 
-  // ── Initial debug log ──────────────────────────────────────────
-  logDebug('info', 'Phase 1 loaded — raw WebSocket API, no frameworks');
-  logDebug('info', 'Enter username + server URL, then click Connect');
-  logDebug('info', 'Using echo server: messages come back to you only');
+  logDebug('info', 'STOMP client ready — Spring Boot + RabbitMQ required');
+  logDebug('info', 'Start Spring Boot first, then enter username and connect');
+  logDebug('info', 'Open two tabs with different usernames to test broadcast');
 </script>
 
 </body>
