@@ -1,0 +1,69 @@
+/*
+  style.css — Global styles for the entire application.
+
+  ─────────────────────────────────────────────────────────────────
+  THE THREE TAILWIND DIRECTIVES
+  These three lines are required for Tailwind to work.
+  PostCSS + Tailwind replaces them with actual CSS at build time.
+
+  @tailwind base
+    Injects Tailwind's base styles (normalize.css equivalent).
+    Resets browser defaults so everything looks consistent
+    across Chrome, Firefox, Safari, Edge.
+
+  @tailwind components
+    Injects any component classes defined with @layer components.
+    We don't add any right now, but this must be here.
+
+  @tailwind utilities
+    Injects ALL utility classes: p-4, text-lg, flex, bg-blue-500 etc.
+    This is the main Tailwind output — hundreds of utility classes
+    ready to use in your Vue templates.
+  ─────────────────────────────────────────────────────────────────
+*/
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/*
+  CSS Custom Properties (variables)
+  Defined on :root so they're available everywhere in the app.
+  We reference these as var(--bg-base) etc. in components.
+
+  Using variables means: to change the entire color scheme,
+  you change these values in ONE place and everything updates.
+*/
+:root {
+  --bg-base:        #080c10;
+  --bg-surface:     #0d1117;
+  --bg-raised:      #161b22;
+  --border:         #21262d;
+  --border-focus:   #388bfd;
+  --accent:         #388bfd;
+  --accent-dim:     rgba(56, 139, 253, 0.1);
+  --text-primary:   #e6edf3;
+  --text-secondary: #7d8590;
+  --text-muted:     #30363d;
+  --green:          #3fb950;
+  --red:            #f85149;
+  --yellow:         #e3b341;
+}
+
+/* Apply dark background and font to the whole page */
+html, body {
+  height: 100%;
+  background-color: var(--bg-base);
+  color: var(--text-primary);
+  font-family: 'Azeret Mono', monospace;
+}
+
+/* Custom scrollbar — thin and subtle */
+::-webkit-scrollbar       { width: 4px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
+::-webkit-scrollbar-thumb:hover { background: var(--accent); }
+
+/* Remove default margins/padding from everything */
+*, *::before, *::after {
+  box-sizing: border-box;
+}

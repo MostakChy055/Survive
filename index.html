@@ -1,13 +1,35 @@
-<!doctype html>
+<!DOCTYPE html>
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
-    <link rel="icon" type="image/svg+xml" href="/vite.svg" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>dropzone</title>
+    <title>Chatroom</title>
   </head>
   <body>
+
+    <!--
+      #app — The mount point for Vue.
+
+      Vue takes over this div completely.
+      Everything rendered by Vue goes inside here.
+
+      In main.js we write:
+        createApp(App).mount('#app')
+
+      That tells Vue: "find the element with id="app"
+      and render the App component inside it."
+
+      Before Vue mounts, this div is empty.
+      After Vue mounts, this div contains your entire application.
+    -->
     <div id="app"></div>
+
+    <!--
+      src/main.js is the JavaScript entry point.
+      type="module" enables ES module syntax (import/export).
+      Vite processes this file and all its imports.
+    -->
     <script type="module" src="/src/main.js"></script>
+
   </body>
 </html>
