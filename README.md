@@ -1,198 +1,153 @@
-<?xml version="1.0" encoding="UTF-8"?>
-<project xmlns="http://maven.apache.org/POM/4.0.0"
-		 xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
-		 xsi:schemaLocation="http://maven.apache.org/POM/4.0.0
-		 					 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+package com.mostak.chatroom.service;
 
-	<modelVersion>4.0.0</modelVersion>
+import com.mostak.chatroom.model.ChatMessage;
+import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
+import org.springframework.amqp.rabbit.annotation.RabbitListener;
+import org.springframework.messaging.simp.SimpMessagingTemplate;
+import org.springframework.stereotype.Service;
 
-	<!--
-		Spring Boot Parent
-		Manages ALL dependency versions automatically.
-		You never need to specify versions for Spring libraries.
-		3.2.5 is a stable LTS release — do not change this.
-	-->
-	<parent>
-		<groupId>org.springframework.boot</groupId>
-		<artifactId>spring-boot-starter-parent</artifactId>
-		<version>3.2.5</version>
-		<relativePath/>
-	</parent>
+/**
+ * ChatMessageListener — Consumes messages FROM RabbitMQ and
+ * broadcasts them TO all connected WebSocket clients.
+ *
+ * ─────────────────────────────────────────────────────────────────
+ * THIS IS THE MISSING PIECE.
+ *
+ * Without this class, the flow was:
+ *   Browser → Spring Boot → RabbitMQ (dead end — messages pile up)
+ *
+ * With this class, the flow is complete:
+ *   Browser → Spring Boot → RabbitMQ → THIS CLASS → All Browsers
+ *
+ * ─────────────────────────────────────────────────────────────────
+ * WHY ROUTE THROUGH RABBITMQ AT ALL?
+ *
+ * You might wonder: ChatController already broadcasts via @SendTo.
+ * Why go through RabbitMQ and broadcast AGAIN here?
+ *
+ * The answer is SCALABILITY.
+ *
+ * Imagine you run TWO Spring Boot instances (two servers):
+ *
+ *   Instance A          Instance B
+ *   alice connected     bob connected
+ *
+ * Alice sends a message → hits Instance A → @SendTo broadcasts...
+ * but only to Instance A's subscribers. Bob is on Instance B.
+ * Bob never sees Alice's message.
+ *
+ * With RabbitMQ in the middle:
+ *   Alice → Instance A → RabbitMQ queue
+ *                              ↓
+ *                    BOTH instances listen
+ *                    BOTH broadcast to their own subscribers
+ *                    Bob (on Instance B) gets the message ✓
+ *
+ * This is exactly Option B from the architecture discussion.
+ * Even with one instance (right now), building it this way
+ * means you can scale later with zero code changes.
+ *
+ * ─────────────────────────────────────────────────────────────────
+ * WHY THIS ALSO FIXES THE CONNECTION ISSUE:
+ *
+ * @RabbitListener makes Spring open a connection to RabbitMQ
+ * IMMEDIATELY at startup — it needs to start listening right away.
+ * RabbitTemplate (used in ChatMessageProducer) is lazy — it only
+ * connects when you first call convertAndSend().
+ *
+ * So adding @RabbitListener is not just a workaround —
+ * it's the correct and complete solution.
+ * ─────────────────────────────────────────────────────────────────
+ */
+@Service
+@Slf4j
+@RequiredArgsConstructor
+public class ChatMessageListener {
 
-	<!--
-		YOUR PROJECT IDENTITY
-		These must match what Spring Initializr generated for you.
-		groupId:    com.mostak
-		artifactId: chatroom
-		Check your original pom.xml — keep whatever Initializr gave you.
-	-->
-	<groupId>com.mostak</groupId>
-	<artifactId>chatroom</artifactId>
-	<version>0.0.1-SNAPSHOT</version>
-	<name>chatroom</name>
-	<description>Real-time chatroom with WebSocket and RabbitMQ</description>
+    /**
+     * SimpMessagingTemplate — Spring's tool for sending messages
+     * to WebSocket subscribers FROM anywhere in the application.
+     *
+     * We used @SendTo in ChatController, which only works as an
+     * annotation on @MessageMapping methods.
+     *
+     * SimpMessagingTemplate works ANYWHERE — services, listeners,
+     * scheduled tasks, event handlers. It's more flexible.
+     *
+     * convertAndSend(destination, payload):
+     *   - Serializes payload to JSON
+     *   - Sends to the in-memory WebSocket broker
+     *   - Broker delivers to ALL subscribers of that destination
+     */
+    private final SimpMessagingTemplate messagingTemplate;
 
-	<properties>
-		<!--
-			Java version.
-			Spring Boot 3.x requires Java 17 minimum.
-			Make sure your IntelliJ project SDK is also set to Java 17+.
-			Check: File → Project Structure → Project → SDK
-		-->
-		<java.version>17</java.version>
-	</properties>
 
-	<dependencies>
+    /**
+     * consumeMessage() — Reads a message from RabbitMQ and
+     * broadcasts it to all connected WebSocket clients.
+     *
+     * @RabbitListener(queues = "${chat.queue}")
+     *
+     *   This annotation does three things:
+     *
+     *   1. At startup: Spring opens a connection to RabbitMQ
+     *      and registers a consumer on "chat.queue".
+     *      This is why the connection now appears immediately.
+     *
+     *   2. Continuously: Spring polls chat.queue in the background.
+     *      The moment a message arrives in the queue,
+     *      this method is called automatically.
+     *
+     *   3. Deserialization: Jackson2JsonMessageConverter (configured
+     *      in RabbitMQConfig) converts the JSON bytes from RabbitMQ
+     *      back into a ChatMessage Java object automatically.
+     *      You receive a fully populated ChatMessage, not raw bytes.
+     *
+     *   "${chat.queue}" reads "chat.queue" from application.properties.
+     *   Same value we used everywhere else — "chat.queue".
+     *
+     * @param chatMessage
+     *   The fully deserialized ChatMessage from RabbitMQ.
+     *   It has all fields: id, content, sender, type, sentAt.
+     *   These were set in ChatController before publishing.
+     */
+    @RabbitListener(queues = "${chat.queue}")
+    public void consumeMessage(ChatMessage chatMessage) {
 
-		<!-- ═══════════════════════════════════════════════════════
-			 1. SPRING WEB
-			 Gives us: embedded Tomcat + Spring MVC.
-			 Needed for REST endpoints (GET /api/messages etc.)
-			 and as the base for WebSocket (handshake starts as HTTP).
-		     ═══════════════════════════════════════════════════════ -->
-		<dependency>
-			<groupId>org.springframework.boot</groupId>
-			<artifactId>spring-boot-starter-web</artifactId>
-		</dependency>
+        log.info(
+            "Consumed from RabbitMQ — sender: {}, type: {}, content: {}",
+            chatMessage.getSender(),
+            chatMessage.getType(),
+            chatMessage.getContent()
+        );
 
-		<!-- ═══════════════════════════════════════════════════════
-			 2. WEBSOCKET + STOMP
-			 Gives us: WebSocket support, STOMP protocol, SockJS.
-			 This is what handles browser ↔ Spring Boot real-time
-			 communication.
-			 @MessageMapping, @SendTo, SimpMessagingTemplate
-			 all come from this dependency.
-		     ═══════════════════════════════════════════════════════ -->
-		<dependency>
-			<groupId>org.springframework.boot</groupId>
-			<artifactId>spring-boot-starter-websocket</artifactId>
-		</dependency>
+        /**
+         * Broadcast to ALL WebSocket subscribers of /topic/chatroom.
+         *
+         * Every browser that has subscribed to /topic/chatroom
+         * will receive this message instantly.
+         *
+         * This is the same destination that @SendTo("/topic/chatroom")
+         * uses in ChatController — so both paths lead to the same place.
+         *
+         * In single-instance mode (right now):
+         *   The message flows: ChatController → RabbitMQ → here → browser
+         *   It's slightly redundant with @SendTo but sets up the
+         *   correct architecture for multi-instance scaling.
+         *
+         * In multi-instance mode (future):
+         *   Remove @SendTo from ChatController entirely.
+         *   ONLY broadcast from here.
+         *   Now all instances broadcast to their own subscribers
+         *   and every user gets every message regardless of which
+         *   server instance they're connected to.
+         */
+        messagingTemplate.convertAndSend("/topic/chatroom", chatMessage);
 
-		<!-- ═══════════════════════════════════════════════════════
-			 3. RABBITMQ / AMQP  ← THE KEY ONE FOR THIS STEP
-			 AMQP = Advanced Message Queuing Protocol.
-			 RabbitMQ implements AMQP.
-
-			 This gives us:
-			   - RabbitTemplate       → publish messages to RabbitMQ
-			   - @RabbitListener      → consume messages from RabbitMQ
-			   - ConnectionFactory    → manages the connection to RabbitMQ
-			   - Jackson2JsonConverter → auto JSON serialization
-			   - Auto-configuration   → reads spring.rabbitmq.* properties
-
-			 WITHOUT this dependency:
-			   - Spring Boot ignores all spring.rabbitmq.* properties
-			   - RabbitMQConfig.java fails to compile
-			   - No connection to RabbitMQ is ever attempted
-			   - chat.exchange never gets created
-		     ═══════════════════════════════════════════════════════ -->
-		<dependency>
-			<groupId>org.springframework.boot</groupId>
-			<artifactId>spring-boot-starter-amqp</artifactId>
-		</dependency>
-
-		<!-- ═══════════════════════════════════════════════════════
-			 4. JPA + HIBERNATE
-			 Gives us: ORM (Object Relational Mapping).
-			 Maps our ChatMessage Java class ↔ chat_messages DB table.
-			 @Entity, @Id, @Column, JpaRepository all come from here.
-
-			 Without this:
-			   - @Entity annotation is unrecognized
-			   - JpaRepository cannot be extended
-			   - No database persistence
-		     ═══════════════════════════════════════════════════════ -->
-		<dependency>
-			<groupId>org.springframework.boot</groupId>
-			<artifactId>spring-boot-starter-data-jpa</artifactId>
-		</dependency>
-
-		<!-- ═══════════════════════════════════════════════════════
-			 5. H2 IN-MEMORY DATABASE
-			 A lightweight database that lives in RAM.
-			 No installation needed — it starts with Spring Boot.
-			 Data resets on every restart (perfect for learning).
-
-			 scope=runtime means:
-			   - Available when the app runs
-			   - NOT needed to compile the code
-			   - Not included in the final JAR's compile classpath
-
-			 Without this:
-			   - Spring Boot can't find a database driver
-			   - App fails to start with DataSource error
-		     ═══════════════════════════════════════════════════════ -->
-		<dependency>
-			<groupId>com.h2database</groupId>
-			<artifactId>h2</artifactId>
-			<scope>runtime</scope>
-		</dependency>
-
-		<!-- ═══════════════════════════════════════════════════════
-			 6. LOMBOK
-			 Eliminates Java boilerplate via annotations:
-			   @Data              → getters, setters, equals, hashCode, toString
-			   @Builder           → builder pattern
-			   @NoArgsConstructor → no-argument constructor
-			   @AllArgsConstructor → all-fields constructor
-			   @RequiredArgsConstructor → constructor for final fields
-			   @Slf4j             → logger field
-
-			 optional=true means Lombok is only needed at compile time.
-			 It is NOT included in the final JAR.
-
-			 IMPORTANT — After Maven syncs, do this in IntelliJ:
-			   Settings → Build → Compiler → Annotation Processors
-			   → check "Enable annotation processing" → OK
-			   Then: Build → Rebuild Project
-
-			 Without annotation processing enabled:
-			   IntelliJ shows red errors on @Data, @Builder etc.
-			   even though the code compiles correctly via Maven.
-		     ═══════════════════════════════════════════════════════ -->
-		<dependency>
-			<groupId>org.projectlombok</groupId>
-			<artifactId>lombok</artifactId>
-			<optional>true</optional>
-		</dependency>
-
-		<!-- ═══════════════════════════════════════════════════════
-			 7. TEST
-			 JUnit 5 + Mockito + Spring Test utilities.
-			 scope=test = only available during mvn test phase.
-			 Spring Initializr always adds this — leave it as-is.
-		     ═══════════════════════════════════════════════════════ -->
-		<dependency>
-			<groupId>org.springframework.boot</groupId>
-			<artifactId>spring-boot-starter-test</artifactId>
-			<scope>test</scope>
-		</dependency>
-
-	</dependencies>
-
-	<build>
-		<plugins>
-			<!--
-				Spring Boot Maven Plugin
-				- Packages the app into a runnable fat JAR
-				  (includes all dependencies + embedded Tomcat)
-				- Enables: mvn spring-boot:run
-				- The <excludes> block removes Lombok from the final JAR
-				  since Lombok is only needed at compile time
-			-->
-			<plugin>
-				<groupId>org.springframework.boot</groupId>
-				<artifactId>spring-boot-maven-plugin</artifactId>
-				<configuration>
-					<excludes>
-						<exclude>
-							<groupId>org.projectlombok</groupId>
-							<artifactId>lombok</artifactId>
-						</exclude>
-					</excludes>
-				</configuration>
-			</plugin>
-		</plugins>
-	</build>
-
-</project>
+        log.info(
+            "Broadcasted to /topic/chatroom — id: {}",
+            chatMessage.getId()
+        );
+    }
+}
