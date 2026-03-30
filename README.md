@@ -1,122 +1,48 @@
-Great choice — getting auth right from the start means you never have to retrofit it later. Let me plan the phases before we write a single line.
+You are absolutely right to catch that. Let me clarify before we write a single line of Phase B.
 
 ---
 
-## What we're building and why JWT
+## Access token vs Refresh token
 
-When a user logs in, the server gives them a **token** — a signed string that proves who they are. Every future request (HTTP or WebSocket) carries that token. The server never stores "who is logged in" — it just verifies the token's signature. This is called **stateless auth**, and it's why JWT scales so well.
+You are thinking of **access token** and **refresh token** — and yes, Phase A only implemented one token doing both jobs, which is a real architectural weakness.
 
-The token looks like this: `header.payload.signature` — three Base64 strings joined by dots. The payload holds the username and expiry. The signature is a cryptographic proof that *your server* issued it.
+Here is why they exist as two separate things:
 
----
+An **access token** is short-lived (15–60 minutes). It is sent with every single request. Because it travels over the network so frequently, there is always a small risk it gets stolen — from a log, a compromised client, a man-in-the-middle. The short expiry limits the damage window: a stolen access token becomes useless within minutes.
 
-## The Phases for Auth
+A **refresh token** is long-lived (7–30 days). It is sent exactly once — only when the access token expires and the client needs a new one. Because it travels rarely, it is far less exposed. It is also stored in the database, which means you can revoke it server-side. If a user logs out, or you detect suspicious activity, you delete the refresh token and the attacker is locked out on their next refresh attempt. You cannot do this with a pure stateless access token.
 
-**Phase A — The foundation:** User model, password hashing, JWT utility, database layer. No endpoints yet — just the building blocks.
+The practical flow looks like this:
 
-**Phase B — The HTTP endpoints:** `POST /auth/register` and `POST /auth/login`. A user can create an account and get a token back.
+The key insight is: the access token never touches the database. It is purely cryptographic — verified by the signature alone. The refresh token lives in the database, which is what gives you the power to revoke it.
 
-**Phase C — Protecting routes:** The JWT filter that reads the token from every request header and tells Spring Security "this request belongs to user X". Locking down endpoints so only authenticated users can reach them.
+So yes — Phase A's `JwtUtil` only generates one kind of token. We are going to fix that right now in Phase B by building both properly from the start. Here is what changes:
 
-**Phase D — WebSocket auth:** Hooking the JWT filter into the WebSocket handshake, so unauthenticated users can't even open a socket connection.
-
-Let's do **Phase A** now — thoroughly, line by line.
+In `application.properties` we will add two expiry values instead of one. `JwtUtil` will gain a second `generateRefreshToken()` method. We will add a `RefreshToken` entity and repository so refresh tokens persist in the database. And the `AuthController` will return both tokens on login, and expose a `/auth/refresh` endpoint.
 
 ---
 
-## Phase A — The Foundation
+## Phase B — HTTP Endpoints + Proper Two-Token Auth
 
-First, the dependencies you need in `build.gradle`:
+### `application.properties` additions
 
-Here is the flow we are building, so you can see where every file fits before we write it:
-
-Now let's write every file, one at a time.
-
----
-
-## Step 1 — `build.gradle` dependencies
-
-```groovy
-dependencies {
-
-    // Spring Boot core web layer — gives us @RestController, HTTP handling
-    implementation 'org.springframework.boot:spring-boot-starter-web'
-
-    // Spring Security — the entire auth framework we are plugging JWT into
-    implementation 'org.springframework.boot:spring-boot-starter-security'
-
-    // Spring Data JPA — lets us write repositories instead of raw SQL
-    implementation 'org.springframework.boot:spring-boot-starter-data-jpa'
-
-    // H2 — an in-memory database, perfect for development
-    // runtimeOnly means it is only needed when the app is actually running, not at compile time
-    runtimeOnly 'com.h2database:h2'
-
-    // jjwt is the standard Java library for creating and parsing JWT tokens
-    // We need all three: the API (interfaces), the implementation, and the Jackson binding
-    // so the library can serialize/deserialize claims as JSON
-    implementation 'io.jsonwebtoken:jjwt-api:0.11.5'
-    runtimeOnly 'io.jsonwebtoken:jjwt-impl:0.11.5'
-    runtimeOnly 'io.jsonwebtoken:jjwt-jackson:0.11.5'
-
-    // Lombok — removes boilerplate: @Getter, @Setter, @Builder, @NoArgsConstructor etc.
-    compileOnly 'org.projectlombok:lombok'
-    annotationProcessor 'org.projectlombok:lombok'
-
-    testImplementation 'org.springframework.boot:spring-boot-starter-test'
-}
-```
-
----
-
-## Step 2 — `application.properties`
-
-**Purpose of this file:** This is where you configure your app without touching Java code. Think of it as the settings panel for your entire application.
+Add these two lines, replacing the single expiration from Phase A:
 
 ```properties
-# ─── H2 In-Memory Database ───────────────────────────────────────────────────
+# Access token — short lived, stateless, never stored in DB
+app.jwt.access-token.expiration=900000
 
-# The JDBC URL tells Spring where to find the database.
-# "mem:chatdb" means it lives entirely in RAM — it is destroyed when the app stops.
-# MODE=PostgreSQL makes H2 behave like Postgres so switching later requires zero SQL changes.
-# DB_CLOSE_DELAY=-1 keeps the database alive as long as the JVM is running.
-spring.datasource.url=jdbc:h2:mem:chatdb;MODE=PostgreSQL;DB_CLOSE_DELAY=-1
-
-spring.datasource.driver-class-name=org.h2.Driver
-spring.datasource.username=sa
-spring.datasource.password=
-
-# Hibernate is the JPA provider. "update" means: look at our entity classes,
-# compare them to the actual DB schema, and add any missing tables or columns.
-# Never use "update" in production — use "validate" or Flyway migrations instead.
-spring.jpa.hibernate.ddl-auto=update
-
-# Makes Hibernate log the actual SQL it runs. Turn this off later — it is noisy.
-spring.jpa.show-sql=true
-
-# H2 web console — lets you inspect the in-memory database at http://localhost:8080/h2-console
-spring.h2.console.enabled=true
-spring.h2.console.path=/h2-console
-
-# ─── JWT Configuration ────────────────────────────────────────────────────────
-
-# This secret is used to sign tokens. It MUST be long (256+ bits) and random.
-# In production, this comes from an environment variable, NEVER committed to git.
-# The value below is just for development.
-app.jwt.secret=404E635266556A586E3272357538782F413F4428472B4B6250645367566B5970
-
-# How long a token lives before it expires. 86400000 ms = 24 hours.
-app.jwt.expiration=86400000
+# Refresh token — long lived, stored in DB, revocable
+app.jwt.refresh-token.expiration=604800000
 ```
 
 ---
 
-## Step 3 — `User.java` (the entity)
+### `RefreshToken.java` (new entity)
 
-**Purpose of this file:** This Java class IS your database table. JPA reads the annotations and creates a `users` table with exactly these columns. Every instance of this class represents one row.
+**Purpose:** This table stores every active refresh token. One row = one logged-in session. When a user logs out, their row is deleted. This is the only stateful part of your auth system.
 
 ```java
-// This package path mirrors your folder structure
 package com.example.chat.model;
 
 import jakarta.persistence.*;
@@ -125,363 +51,493 @@ import lombok.Builder;
 import lombok.Data;
 import lombok.NoArgsConstructor;
 
-// @Entity tells JPA: "this class maps to a database table"
-// Without this annotation, JPA completely ignores the class
+import java.time.Instant;
+
 @Entity
-
-// @Table lets us name the table explicitly.
-// Without it, JPA uses the class name — which would also be "user",
-// but "user" is a reserved keyword in PostgreSQL, so we name it explicitly.
-@Table(name = "users")
-
-// Lombok: @Data generates getters, setters, equals, hashCode, and toString
-// @Builder generates a builder pattern: User.builder().username("alice").build()
-// @NoArgsConstructor and @AllArgsConstructor generate the two constructors JPA needs
+@Table(name = "refresh_tokens")
 @Data
 @Builder
 @NoArgsConstructor
 @AllArgsConstructor
-public class User {
+public class RefreshToken {
 
-    // @Id marks this field as the primary key
-    // @GeneratedValue tells JPA to auto-assign IDs — IDENTITY means the DB handles it
     @Id
     @GeneratedValue(strategy = GenerationType.IDENTITY)
     private Long id;
 
-    // @Column with unique=true creates a UNIQUE constraint in the DB.
-    // nullable=false means this column cannot be NULL — enforced at DB level.
-    // Spring validation (later) adds a second layer of enforcement before the DB is even hit.
-    @Column(unique = true, nullable = false)
-    private String username;
+    // Which user does this session belong to?
+    // FetchType.LAZY means: don't load the User object from DB until it is actually accessed.
+    // This avoids unnecessary DB queries when you only need the token value.
+    @ManyToOne(fetch = FetchType.LAZY)
+    @JoinColumn(name = "user_id", nullable = false)
+    private User user;
 
-    @Column(unique = true, nullable = false)
-    private String email;
+    // The actual token string stored in DB — a randomly generated UUID, NOT a JWT.
+    // We use a random UUID because refresh tokens do not need to carry claims.
+    // Their only job is to be an unforgeable key that maps back to a user in our DB.
+    @Column(nullable = false, unique = true)
+    private String token;
 
-    // This stores the BCrypt hash of the password, NOT the plain-text password.
-    // A BCrypt hash looks like: $2a$10$abcdefghijklmnopqrstuuABC...
-    // It is physically impossible to reverse it back to the original password.
+    // When this refresh token stops being valid.
+    // Instant is used instead of Date because it is timezone-agnostic
+    // and works cleanly with Java's modern time API.
     @Column(nullable = false)
-    private String password;
-
-    // The role determines what the user is allowed to do.
-    // For now, everyone is ROLE_USER. Later, admins get ROLE_ADMIN.
-    // Spring Security reads this to make authorization decisions.
-    @Column(nullable = false)
-    private String role;
+    private Instant expiresAt;
 }
 ```
 
 ---
 
-## Step 4 — `UserRepository.java`
+### `RefreshTokenRepository.java`
 
-**Purpose of this file:** This is your entire database access layer for users. Spring Data JPA generates all the SQL for you — you never write `SELECT * FROM users WHERE...` by hand.
+**Purpose:** Database access for refresh tokens. The key operation is "find a session by token string" — used when the client asks for a new access token.
 
 ```java
 package com.example.chat.repository;
 
+import com.example.chat.model.RefreshToken;
 import com.example.chat.model.User;
 import org.springframework.data.jpa.repository.JpaRepository;
 import org.springframework.stereotype.Repository;
 
 import java.util.Optional;
 
-// @Repository marks this as a Spring-managed bean.
-// JpaRepository<User, Long> means: "this repository manages User objects, whose ID type is Long"
-// By extending JpaRepository, we automatically get: save(), findById(), findAll(),
-// delete(), count(), and many more — all implemented by Spring, zero SQL written.
 @Repository
-public interface UserRepository extends JpaRepository<User, Long> {
+public interface RefreshTokenRepository extends JpaRepository<RefreshToken, Long> {
 
-    // This is a "derived query method". Spring reads the method name and generates SQL:
-    // SELECT * FROM users WHERE username = ?
-    // Optional<> is used instead of User because the user might not exist —
-    // it forces the caller to handle the "not found" case explicitly, preventing NullPointerExceptions
-    Optional<User> findByUsername(String username);
+    // Used during token refresh: client sends the token string,
+    // we look it up to find the associated user and check the expiry.
+    Optional<RefreshToken> findByToken(String token);
 
-    // Spring generates: SELECT * FROM users WHERE email = ?
-    // Used during registration to check if the email is already taken
-    Optional<User> findByEmail(String email);
+    // Used during logout: delete this user's session from the DB.
+    // The int return value is the number of rows deleted (0 or 1).
+    int deleteByUser(User user);
 
-    // Spring generates: SELECT CASE WHEN COUNT(*) > 0 THEN TRUE ELSE FALSE END FROM users WHERE username = ?
-    // Cleaner than findByUsername().isPresent() when you only care about existence
-    boolean existsByUsername(String username);
-
-    boolean existsByEmail(String email);
+    // Used if you later want to enforce one-session-per-user:
+    // delete all existing sessions before creating a new one on login.
+    // For now we allow multiple sessions (multiple devices).
+    int deleteAllByUser(User user);
 }
 ```
 
 ---
 
-## Step 5 — `JwtUtil.java`
+### Updated `JwtUtil.java`
 
-**Purpose of this file:** This is the brain of your JWT system. It does exactly two things: create tokens when a user logs in, and verify tokens when a user makes a request. Every other class delegates to this one for anything JWT-related.
+**Purpose:** Now generates two distinct token types with separate expiry durations. The refresh token is a simple UUID — not a JWT — because it does not need to carry any data. Its only job is to be a random, unguessable key.
 
 ```java
 package com.example.chat.security;
 
 import io.jsonwebtoken.*;
+import io.jsonwebtoken.io.Decoders;
 import io.jsonwebtoken.security.Keys;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
 
 import java.security.Key;
+import java.time.Instant;
 import java.util.Date;
+import java.util.UUID;
 
-// @Component registers this class as a Spring bean so other classes can @Autowire it
 @Component
 public class JwtUtil {
 
-    // @Value reads the value from application.properties at startup.
-    // The ${...} syntax tells Spring: "look up this key and inject its value here"
     @Value("${app.jwt.secret}")
     private String jwtSecret;
 
-    @Value("${app.jwt.expiration}")
-    private long jwtExpirationMs;
+    // Now we have two separate expiry durations — one per token type
+    @Value("${app.jwt.access-token.expiration}")
+    private long accessTokenExpirationMs;
 
-    // This method converts our raw secret string into a cryptographic Key object.
-    // Keys.hmacShaKeyFor() ensures the key is long enough for HMAC-SHA256 signing.
-    // It is private because nothing outside this class should ever touch the raw key.
+    @Value("${app.jwt.refresh-token.expiration}")
+    private long refreshTokenExpirationMs;
+
     private Key getSigningKey() {
-        // HexFormat.of().parseHex() converts our hex string from application.properties
-        // into the raw bytes that the cryptographic library needs
-        byte[] keyBytes = io.jsonwebtoken.io.Decoders.BASE64.decode(jwtSecret);
+        byte[] keyBytes = Decoders.BASE64.decode(jwtSecret);
         return Keys.hmacShaKeyFor(keyBytes);
     }
 
-    // Called once when a user successfully logs in.
-    // username is embedded inside the token as the "subject" claim.
-    // Anyone who has this token can prove they are that username — until it expires.
-    public String generateToken(String username) {
+    // Generates a SHORT-LIVED JWT access token (15 minutes).
+    // This is what gets sent in the Authorization header with every API request.
+    public String generateAccessToken(String username) {
         return Jwts.builder()
-                // setSubject stores the username inside the token payload
                 .setSubject(username)
-                // setIssuedAt records when the token was created
+                // We add a custom claim "type" so we can reject refresh tokens
+                // being used as access tokens (a security hardening measure for later)
+                .claim("type", "access")
                 .setIssuedAt(new Date())
-                // setExpiration sets when the token stops being valid
-                // new Date(System.currentTimeMillis() + jwtExpirationMs) = now + 24 hours
-                .setExpiration(new Date(System.currentTimeMillis() + jwtExpirationMs))
-                // signWith signs the token with our secret key using HMAC-SHA256
-                // This signature is what makes the token tamper-proof:
-                // if anyone changes even one character of the payload, the signature becomes invalid
+                .setExpiration(new Date(System.currentTimeMillis() + accessTokenExpirationMs))
                 .signWith(getSigningKey(), SignatureAlgorithm.HS256)
-                // compact() serializes everything into the final "header.payload.signature" string
                 .compact();
     }
 
-    // Called on every incoming request to extract who the token belongs to.
-    // The username is then used to load the full user from the database.
+    // Generates a random UUID string that will be stored in the DB as a refresh token.
+    // UUID.randomUUID() produces a cryptographically random 128-bit value —
+    // impossible to guess, impossible to brute-force.
+    // We return the Instant expiry alongside it so the service can store both together.
+    public String generateRefreshTokenValue() {
+        return UUID.randomUUID().toString();
+    }
+
+    // Convenience method: the service asks "when should this refresh token expire?"
+    public Instant calculateRefreshTokenExpiry() {
+        return Instant.now().plusMillis(refreshTokenExpirationMs);
+    }
+
+    // Extracts the username from an access token.
+    // Called by the JWT filter on every incoming request.
     public String extractUsername(String token) {
         return Jwts.parserBuilder()
-                // We must provide the same key that was used to sign the token
-                // so the library can verify the signature
                 .setSigningKey(getSigningKey())
                 .build()
-                // parseClaimsJws() does three things at once:
-                // 1. Verifies the signature (throws if tampered)
-                // 2. Checks the expiration date (throws if expired)
-                // 3. Returns the parsed claims object
                 .parseClaimsJws(token)
                 .getBody()
-                // getSubject() returns the username we stored in generateToken()
                 .getSubject();
     }
 
-    // Called before trusting a token. Returns true only if:
-    // 1. The signature is valid (proves we issued it)
-    // 2. The token has not expired
-    // 3. The username inside the token matches the user we loaded from DB
-    public boolean isTokenValid(String token, String username) {
+    // Validates an access token — checks signature and expiry.
+    public boolean isAccessTokenValid(String token, String username) {
         try {
-            String extractedUsername = extractUsername(token);
-            // Check: does the token belong to this specific user, AND is it not expired?
-            return extractedUsername.equals(username) && !isTokenExpired(token);
+            String extracted = extractUsername(token);
+            return extracted.equals(username) && !isTokenExpired(token);
         } catch (JwtException | IllegalArgumentException e) {
-            // JwtException covers: invalid signature, malformed token, expired token
-            // We catch all of these and simply return false — no crash, no information leak
             return false;
         }
     }
 
     private boolean isTokenExpired(String token) {
-        // getExpiration() returns the Date we set in generateToken()
-        // .before(new Date()) means: is the expiration date in the past?
-        return extractExpiration(token).before(new Date());
-    }
-
-    private Date extractExpiration(String token) {
         return Jwts.parserBuilder()
                 .setSigningKey(getSigningKey())
                 .build()
                 .parseClaimsJws(token)
                 .getBody()
-                .getExpiration();
+                .getExpiration()
+                .before(new Date());
     }
 }
 ```
 
 ---
 
-## Step 6 — `UserDetailsServiceImpl.java`
+### The DTOs
 
-**Purpose of this file:** Spring Security does not know what a "User" is — it only understands its own interface called `UserDetails`. This class is the translator. It loads your `User` from the database and wraps it in a `UserDetails` object that Spring Security can work with.
+**Purpose of DTOs (Data Transfer Objects):** These are simple classes that define the exact shape of the JSON going in and out of your API. They act as a contract — the frontend knows exactly what fields to send and what to expect back. You never expose your `User` entity directly because it contains the password hash.
 
 ```java
-package com.example.chat.security;
+// ─── RegisterRequest.java ─────────────────────────────────────────────────────
+// The body the client sends to POST /api/auth/register
+package com.example.chat.dto;
 
+import lombok.Data;
+
+@Data
+public class RegisterRequest {
+    // @Data generates getters/setters — Jackson (the JSON library) uses
+    // these getters/setters to deserialize the incoming JSON into this object
+    private String username;
+    private String email;
+    private String password;  // plain-text here — we hash it in the service, never before
+}
+```
+
+```java
+// ─── LoginRequest.java ────────────────────────────────────────────────────────
+// The body the client sends to POST /api/auth/login
+package com.example.chat.dto;
+
+import lombok.Data;
+
+@Data
+public class LoginRequest {
+    private String username;
+    private String password;  // plain-text — Spring Security will compare it against the BCrypt hash
+}
+```
+
+```java
+// ─── AuthResponse.java ────────────────────────────────────────────────────────
+// What the server sends BACK after successful register or login.
+// The client must store both tokens — access token in memory, refresh token in localStorage.
+package com.example.chat.dto;
+
+import lombok.AllArgsConstructor;
+import lombok.Builder;
+import lombok.Data;
+import lombok.NoArgsConstructor;
+
+@Data
+@Builder
+@NoArgsConstructor
+@AllArgsConstructor
+public class AuthResponse {
+
+    // Short-lived JWT — goes in the Authorization header of every request
+    private String accessToken;
+
+    // Long-lived UUID — stored by the client, sent only to /auth/refresh
+    private String refreshToken;
+
+    // Useful for the frontend to know who just logged in without decoding the JWT
+    private String username;
+
+    // The "Bearer" prefix is a convention — it tells the server
+    // the auth scheme being used. Always "Bearer" for JWT.
+    private String tokenType = "Bearer";
+}
+```
+
+```java
+// ─── RefreshRequest.java ──────────────────────────────────────────────────────
+// The body the client sends to POST /api/auth/refresh
+package com.example.chat.dto;
+
+import lombok.Data;
+
+@Data
+public class RefreshRequest {
+    // The client sends back the refresh token UUID it stored at login
+    private String refreshToken;
+}
+```
+
+---
+
+### `AuthService.java`
+
+**Purpose:** Contains all the business logic for auth. The controller stays thin and just delegates to this service. This separation means if you ever change your auth logic, you change it in one place.
+
+```java
+package com.example.chat.service;
+
+import com.example.chat.dto.*;
+import com.example.chat.model.RefreshToken;
 import com.example.chat.model.User;
+import com.example.chat.repository.RefreshTokenRepository;
 import com.example.chat.repository.UserRepository;
+import com.example.chat.security.JwtUtil;
 import lombok.RequiredArgsConstructor;
-import org.springframework.security.core.authority.SimpleGrantedAuthority;
-import org.springframework.security.core.userdetails.UserDetails;
-import org.springframework.security.core.userdetails.UserDetailsService;
-import org.springframework.security.core.userdetails.UsernameNotFoundException;
+import org.springframework.security.authentication.AuthenticationManager;
+import org.springframework.security.authentication.UsernamePasswordAuthenticationToken;
+import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
 
-import java.util.List;
+import java.time.Instant;
 
-// @RequiredArgsConstructor (Lombok) generates a constructor that injects all final fields.
-// This is the recommended way to do dependency injection — cleaner than @Autowired on fields.
 @Service
 @RequiredArgsConstructor
-public class UserDetailsServiceImpl implements UserDetailsService {
+public class AuthService {
 
-    // final means Spring MUST inject this — it cannot be null
     private final UserRepository userRepository;
+    private final RefreshTokenRepository refreshTokenRepository;
+    private final PasswordEncoder passwordEncoder;
+    private final JwtUtil jwtUtil;
+    private final AuthenticationManager authenticationManager;
 
-    // Spring Security calls this method automatically whenever it needs to verify
-    // who a request belongs to. The username comes from the JWT token we extracted.
-    @Override
-    public UserDetails loadUserByUsername(String username) throws UsernameNotFoundException {
+    // @Transactional means: if anything inside this method throws an exception,
+    // ALL database changes made so far in this method are rolled back automatically.
+    // So if saving the refresh token fails, the user record also gets undone — no orphan data.
+    @Transactional
+    public AuthResponse register(RegisterRequest request) {
 
-        // We look up the user in the database by username
-        User user = userRepository.findByUsername(username)
-                // If the user does not exist, throw UsernameNotFoundException.
-                // Spring Security catches this and returns a 401 Unauthorized response.
-                .orElseThrow(() -> new UsernameNotFoundException(
-                        "User not found with username: " + username
-                ));
+        // Validate uniqueness before attempting to save.
+        // This gives us a clean, descriptive error instead of a raw DB constraint violation.
+        if (userRepository.existsByUsername(request.getUsername())) {
+            throw new RuntimeException("Username already taken: " + request.getUsername());
+        }
+        if (userRepository.existsByEmail(request.getEmail())) {
+            throw new RuntimeException("Email already registered: " + request.getEmail());
+        }
 
-        // Spring Security's own User class (different from our User entity!) implements UserDetails.
-        // We use it as a convenient wrapper. We pass it:
-        // 1. The username
-        // 2. The BCrypt-hashed password (Spring Security will compare this against what the user sends)
-        // 3. The list of "authorities" (roles) — SimpleGrantedAuthority wraps our "ROLE_USER" string
-        return new org.springframework.security.core.userdetails.User(
-                user.getUsername(),
-                user.getPassword(),
-                List.of(new SimpleGrantedAuthority(user.getRole()))
+        // Build and save the new user.
+        // passwordEncoder.encode() hashes the plain-text password with BCrypt.
+        // From this point on, the plain-text password is GONE — even we cannot recover it.
+        User user = User.builder()
+                .username(request.getUsername())
+                .email(request.getEmail())
+                .password(passwordEncoder.encode(request.getPassword()))
+                .role("ROLE_USER")
+                .build();
+
+        userRepository.save(user);
+
+        // After registration, immediately issue both tokens so the user is logged in.
+        return issueTokenPair(user);
+    }
+
+    @Transactional
+    public AuthResponse login(LoginRequest request) {
+
+        // AuthenticationManager does the heavy lifting here.
+        // It calls UserDetailsService.loadUserByUsername(), then uses PasswordEncoder
+        // to compare the submitted password against the stored BCrypt hash.
+        // If the credentials are wrong, it throws BadCredentialsException automatically.
+        authenticationManager.authenticate(
+                new UsernamePasswordAuthenticationToken(
+                        request.getUsername(),
+                        request.getPassword()
+                )
         );
+
+        // If we reach here, authentication passed — the credentials are valid.
+        User user = userRepository.findByUsername(request.getUsername())
+                .orElseThrow(() -> new RuntimeException("User not found"));
+
+        // Delete any existing refresh tokens for this user before issuing a new one.
+        // This enforces a single active session per user. Remove this line
+        // if you want to support multiple devices simultaneously.
+        refreshTokenRepository.deleteAllByUser(user);
+
+        return issueTokenPair(user);
+    }
+
+    @Transactional
+    public AuthResponse refresh(RefreshRequest request) {
+
+        // Look up the refresh token in the database.
+        // If it does not exist, the client sent an invalid or already-revoked token.
+        RefreshToken stored = refreshTokenRepository.findByToken(request.getRefreshToken())
+                .orElseThrow(() -> new RuntimeException("Invalid refresh token"));
+
+        // Check if the refresh token itself has expired.
+        // Even though it is in the DB, it might have outlived its 7-day window.
+        if (stored.getExpiresAt().isBefore(Instant.now())) {
+            // Clean up the expired token from the DB
+            refreshTokenRepository.delete(stored);
+            throw new RuntimeException("Refresh token expired. Please log in again.");
+        }
+
+        // The refresh token is valid — issue a fresh access token.
+        // We do NOT issue a new refresh token here (that would be "refresh token rotation").
+        // Rotation is more secure but more complex. We will add it later.
+        String newAccessToken = jwtUtil.generateAccessToken(stored.getUser().getUsername());
+
+        return AuthResponse.builder()
+                .accessToken(newAccessToken)
+                .refreshToken(stored.getToken())  // the same refresh token continues
+                .username(stored.getUser().getUsername())
+                .build();
+    }
+
+    @Transactional
+    public void logout(String refreshTokenValue) {
+        // Find the refresh token and delete it.
+        // Once deleted, the next /auth/refresh call with this token will return an error,
+        // effectively ending the session even if the access token has not expired yet.
+        refreshTokenRepository.findByToken(refreshTokenValue)
+                .ifPresent(refreshTokenRepository::delete);
+    }
+
+    // Private helper used by both register() and login() to avoid repeating
+    // the token-creation logic. Both operations end with the same result:
+    // a valid access token + a valid refresh token returned to the client.
+    private AuthResponse issueTokenPair(User user) {
+        String accessToken = jwtUtil.generateAccessToken(user.getUsername());
+
+        // Create and persist the refresh token entity
+        RefreshToken refreshToken = RefreshToken.builder()
+                .user(user)
+                .token(jwtUtil.generateRefreshTokenValue())
+                .expiresAt(jwtUtil.calculateRefreshTokenExpiry())
+                .build();
+
+        refreshTokenRepository.save(refreshToken);
+
+        return AuthResponse.builder()
+                .accessToken(accessToken)
+                .refreshToken(refreshToken.getToken())
+                .username(user.getUsername())
+                .build();
     }
 }
 ```
 
 ---
 
-## Step 7 — `SecurityConfig.java`
+### `AuthController.java`
 
-**Purpose of this file:** This is the gatekeeper of your entire application. It defines which URLs are public, which require a logged-in user, how passwords are hashed, and wires all the security components together. Every security decision flows through here.
+**Purpose:** The HTTP layer. Maps URLs to service methods. Stays deliberately thin — no business logic lives here, only request/response handling.
 
 ```java
-package com.example.chat.config;
+package com.example.chat.controller;
 
+import com.example.chat.dto.*;
+import com.example.chat.service.AuthService;
 import lombok.RequiredArgsConstructor;
-import org.springframework.context.annotation.Bean;
-import org.springframework.context.annotation.Configuration;
-import org.springframework.security.authentication.AuthenticationManager;
-import org.springframework.security.authentication.AuthenticationProvider;
-import org.springframework.security.authentication.dao.DaoAuthenticationProvider;
-import org.springframework.security.config.annotation.authentication.configuration.AuthenticationConfiguration;
-import org.springframework.security.config.annotation.web.builders.HttpSecurity;
-import org.springframework.security.config.annotation.web.configuration.EnableWebSecurity;
-import org.springframework.security.config.http.SessionCreationPolicy;
-import org.springframework.security.crypto.bcrypt.BCryptPasswordEncoder;
-import org.springframework.security.crypto.password.PasswordEncoder;
-import org.springframework.security.web.SecurityFilterChain;
+import org.springframework.http.HttpStatus;
+import org.springframework.http.ResponseEntity;
+import org.springframework.web.bind.annotation.*;
 
-// @Configuration tells Spring: "this class produces beans — read its @Bean methods"
-// @EnableWebSecurity activates Spring Security's web security support
-@Configuration
-@EnableWebSecurity
+// @RestController = @Controller + @ResponseBody
+// Every method return value is automatically serialized to JSON
+@RestController
+// All endpoints in this class are prefixed with /api/auth
+@RequestMapping("/api/auth")
 @RequiredArgsConstructor
-public class SecurityConfig {
+public class AuthController {
 
-    private final UserDetailsServiceImpl userDetailsService;
+    private final AuthService authService;
 
-    // @Bean means: "Spring, manage this object in your container so others can inject it"
-    // BCryptPasswordEncoder is the industry-standard way to hash passwords.
-    // BCrypt is deliberately slow (takes ~100ms) to make brute-force attacks impractical.
-    @Bean
-    public PasswordEncoder passwordEncoder() {
-        return new BCryptPasswordEncoder();
+    // POST /api/auth/register
+    // @RequestBody tells Spring to deserialize the incoming JSON into a RegisterRequest object
+    // ResponseEntity lets us control the HTTP status code explicitly
+    @PostMapping("/register")
+    public ResponseEntity<AuthResponse> register(@RequestBody RegisterRequest request) {
+        AuthResponse response = authService.register(request);
+        // 201 Created is the correct status for a resource being created,
+        // as opposed to 200 OK which implies something was just retrieved
+        return ResponseEntity.status(HttpStatus.CREATED).body(response);
     }
 
-    // AuthenticationProvider is the component that actually checks "is this password correct?"
-    // DaoAuthenticationProvider uses our UserDetailsService to load the user from the DB,
-    // then uses the PasswordEncoder to compare the submitted password against the stored hash.
-    @Bean
-    public AuthenticationProvider authenticationProvider() {
-        DaoAuthenticationProvider provider = new DaoAuthenticationProvider();
-        // Tell it which service to use to load users
-        provider.setUserDetailsService(userDetailsService);
-        // Tell it which encoder to use to compare passwords
-        provider.setPasswordEncoder(passwordEncoder());
-        return provider;
+    // POST /api/auth/login
+    @PostMapping("/login")
+    public ResponseEntity<AuthResponse> login(@RequestBody LoginRequest request) {
+        AuthResponse response = authService.login(request);
+        return ResponseEntity.ok(response);  // 200 OK
     }
 
-    // AuthenticationManager is what your AuthController will call when a user tries to log in.
-    // Spring creates this from the configuration automatically — we just expose it as a bean.
-    @Bean
-    public AuthenticationManager authenticationManager(
-            AuthenticationConfiguration config) throws Exception {
-        return config.getAuthenticationManager();
+    // POST /api/auth/refresh
+    // The client sends its refresh token and gets a new access token back
+    @PostMapping("/refresh")
+    public ResponseEntity<AuthResponse> refresh(@RequestBody RefreshRequest request) {
+        AuthResponse response = authService.refresh(request);
+        return ResponseEntity.ok(response);
     }
 
-    // SecurityFilterChain is the main security pipeline.
-    // Every HTTP request passes through this chain of rules.
-    @Bean
-    public SecurityFilterChain securityFilterChain(HttpSecurity http) throws Exception {
-        http
-            // Disable CSRF (Cross-Site Request Forgery) protection.
-            // CSRF is a browser-based attack. Since our API uses JWT tokens in headers
-            // (not browser cookies), CSRF is not applicable here.
-            .csrf(csrf -> csrf.disable())
-
-            // Define which URLs require authentication and which are public
-            .authorizeHttpRequests(auth -> auth
-                // These endpoints must be public — users cannot log in if login requires auth!
-                .requestMatchers("/api/auth/**").permitAll()
-                // The H2 console also needs to be public during development
-                .requestMatchers("/h2-console/**").permitAll()
-                // Every other request requires the user to be authenticated
-                .anyRequest().authenticated()
-            )
-
-            // STATELESS means: do NOT create HTTP sessions.
-            // Instead of a session cookie, every request must carry its JWT token.
-            // This is what makes JWT auth "stateless" — the server remembers nothing between requests.
-            .sessionManagement(session -> session
-                .sessionCreationPolicy(SessionCreationPolicy.STATELESS)
-            )
-
-            // Register our custom AuthenticationProvider
-            .authenticationProvider(authenticationProvider())
-
-            // H2 console uses iframes. Spring Security blocks iframes by default.
-            // This disables that block so we can use the console in development.
-            .headers(headers -> headers.frameOptions(frame -> frame.disable()));
-
-        return http.build();
+    // POST /api/auth/logout
+    // The client sends its refresh token so we can delete it from the DB
+    @PostMapping("/logout")
+    public ResponseEntity<Void> logout(@RequestBody RefreshRequest request) {
+        authService.logout(request.getRefreshToken());
+        // 204 No Content is the correct status when an operation succeeded but there is nothing to return
+        return ResponseEntity.noContent().build();
     }
 }
 ```
 
 ---
 
-Phase A is now complete. You have the entire foundation: the database layer, the password hashing, the JWT engine, and the security configuration wired together — but no HTTP endpoints yet.
+## What you can test right now
 
-Here is what Phase B (the next step) will build on top of this: an `AuthController` with `POST /api/auth/register` and `POST /api/auth/login`, plus the DTOs that carry the request and response data. Then Phase C adds the `JwtAuthFilter` that intercepts every request and reads the token from the `Authorization` header.
+Start the application and use any HTTP client (Postman, curl, or the H2 console). With these three requests you can verify the full cycle:
 
-Ready to move to Phase B? Before we do — do you want me to clarify anything about Phase A? The `UserDetailsServiceImpl` and `SecurityConfig` interaction is the part most people find confusing at first.
+```
+POST /api/auth/register
+{ "username": "alice", "email": "alice@test.com", "password": "secret123" }
+→ returns accessToken + refreshToken
+
+POST /api/auth/login
+{ "username": "alice", "password": "secret123" }
+→ returns new accessToken + refreshToken
+
+POST /api/auth/refresh
+{ "refreshToken": "<the UUID from login>" }
+→ returns new accessToken, same refreshToken
+```
+
+---
+
+Phase B is complete. The next phase, Phase C, is where the two tokens start working together in real requests — we build the `JwtAuthFilter` that intercepts every incoming HTTP request, reads the access token from the `Authorization: Bearer <token>` header, validates it, and tells Spring Security "this request belongs to user X." Without that filter, the protected endpoints we set up in `SecurityConfig` cannot actually verify who is calling them.
+
+Ready for Phase C?
